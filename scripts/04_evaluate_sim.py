@@ -8,8 +8,9 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -38,6 +39,107 @@ def resolve_device(cfg_device: str) -> torch.device:
     return torch.device(cfg_device)
 
 
+def render_hud_frame(
+    rgb: np.ndarray,
+    telemetry: Dict[str, Any],
+    decision: Dict[str, Any],
+    gated_info: Dict[str, Any],
+    control_action: Tuple[float, float],
+    info: Dict[str, Any],
+    ep_idx: int,
+    num_episodes: int,
+    dt_ms: float,
+    simulator_name: str,
+) -> np.ndarray:
+    """Render an upscaled 784x532 BGR HUD frame overlaying Laya decisions, telemetry, and Safety Shield."""
+    cam_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    cam_up = cv2.resize(cam_bgr, (784, 392), interpolation=cv2.INTER_NEAREST)
+
+    # Draw subtle 4x9 spatial pooling grid overlay on camera view
+    for gx in range(1, 9):
+        x = int(gx * 784 / 9)
+        cv2.line(cam_up, (x, 0), (x, 392), (55, 70, 55), 1)
+    for gy in range(1, 4):
+        y = int(gy * 392 / 4)
+        cv2.line(cam_up, (0, y), (784, y), (55, 70, 55), 1)
+
+    panel = np.full((140, 784, 3), (24, 26, 32), dtype=np.uint8)
+    cv2.line(panel, (0, 0), (784, 0), (90, 180, 255), 2)
+
+    spd = float(telemetry.get("speed_kmh", 0.0))
+    tgt_spd = float(gated_info.get("target_speed_kmh", 40.0))
+    offset = float(telemetry.get("lane_offset_m", 0.0))
+    lead_d = float(telemetry.get("lead_distance_m", 60.0))
+    tl = str(telemetry.get("traffic_light", "green")).upper()
+    route_pct = float(info.get("route_completion", 0.0)) * 100.0
+    fps = 1000.0 / max(1e-2, dt_ms)
+
+    # Row 1: Simulator, Episode, Speed, Latency/FPS, Progress
+    cv2.putText(
+        panel,
+        f"[{simulator_name.upper()}] Ep {ep_idx + 1}/{num_episodes} | "
+        f"Speed: {spd:4.1f}/{tgt_spd:2.0f} km/h | "
+        f"Latency: {dt_ms:4.1f} ms ({fps:4.1f} FPS) | "
+        f"Route: {route_pct:5.1f}%",
+        (14, 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.54,
+        (235, 240, 245),
+        1,
+        cv2.LINE_AA,
+    )
+
+    # Row 2: Laya Non-Autoregressive Decision + Confidence + AEB
+    m_name = str(gated_info.get("maneuver", decision["maneuver"])).upper()
+    m_conf = float(decision["maneuver_confidence"]) * 100.0
+    s_lvl = int(gated_info.get("speed_level", decision["speed_level"]))
+    aeb_p = float(decision["emergency_brake"]) * 100.0
+    shield_on = bool(gated_info.get("shield_triggered", False))
+    shield_reason = str(gated_info.get("shield_reason", "none"))
+
+    dec_color = (80, 235, 130) if not shield_on else (70, 90, 255)
+    cv2.putText(
+        panel,
+        f"Laya Decision: {m_name} (Conf {m_conf:4.1f}%) | "
+        f"Speed Lvl: {s_lvl} | AEB Prob: {aeb_p:4.1f}%",
+        (14, 72),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        dec_color,
+        2,
+        cv2.LINE_AA,
+    )
+
+    shield_txt = f"SHIELD: {shield_reason}" if shield_on else "SHIELD: NOMINAL (PASS)"
+    shield_col = (60, 75, 255) if shield_on else (110, 220, 110)
+    cv2.putText(
+        panel,
+        shield_txt,
+        (525, 72),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        shield_col,
+        2 if shield_on else 1,
+        cv2.LINE_AA,
+    )
+
+    # Row 3: Physical PID Actuation & Environment State
+    steer, tb = float(control_action[0]), float(control_action[1])
+    cv2.putText(
+        panel,
+        f"PID Control -> Steer: {steer:+5.2f} | Throttle/Brake: {tb:+5.2f} | "
+        f"Lead Dist: {lead_d:4.1f}m | Offset: {offset:+4.2f}m | Light: {tl}",
+        (14, 114),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.50,
+        (185, 200, 220),
+        1,
+        cv2.LINE_AA,
+    )
+
+    return np.vstack([cam_up, panel])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate closed-loop autonomous driving on unseen MetaDrive maps and measure KPIs."
@@ -57,10 +159,25 @@ def main() -> None:
         choices=["metadrive", "carla"],
         help="Simulator backend ('metadrive' or 'carla').",
     )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        help="Open real-time 3D simulator window and live OpenCV HUD dashboard.",
+    )
+    parser.add_argument(
+        "--save-video",
+        type=str,
+        nargs="?",
+        const="checkpoints/driving_demo.mp4",
+        default=None,
+        help="Save HUD driving video to MP4 file (default: checkpoints/driving_demo.mp4).",
+    )
     parser.add_argument("--mock", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.render:
+        cfg.setdefault("env", {})["use_render"] = True
     use_mock = bool(args.mock or cfg.get("project", {}).get("use_mock", False))
     simulator_name = (args.simulator or cfg.get("env", {}).get("simulator", "metadrive")).lower()
     device = resolve_device(cfg.get("project", {}).get("device", "auto"))
@@ -147,6 +264,17 @@ def main() -> None:
     all_s_targets: List[int] = []
     all_a_targets: List[int] = []
 
+    video_writer = None
+    video_out_path = None
+    if args.save_video:
+        video_out_path = Path(args.save_video)
+        if not video_out_path.is_absolute():
+            video_out_path = PROJECT_ROOT / video_out_path
+        video_out_path.parent.mkdir(parents=True, exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        video_writer = cv2.VideoWriter(str(video_out_path), fourcc, 20.0, (784, 532))
+        print(f"[04_evaluate_sim] Recording driving HUD video to: {video_out_path}")
+
     for ep in tqdm(
         range(num_episodes), desc="Evaluating Closed-Loop Unseen Maps", unit="ep"
     ):
@@ -204,12 +332,38 @@ def main() -> None:
             if gated_info["shield_triggered"]:
                 shield_reasons[gated_info["shield_reason"]] += 1
 
-            rgb, telemetry, _, done, info = env.step(control_action)
+            if args.render or video_writer is not None:
+                hud_bgr = render_hud_frame(
+                    rgb=rgb,
+                    telemetry=telemetry,
+                    decision=decision,
+                    gated_info=gated_info,
+                    control_action=control_action,
+                    info=info,
+                    ep_idx=ep,
+                    num_episodes=num_episodes,
+                    dt_ms=dt_ms,
+                    simulator_name=simulator_name,
+                )
+                if video_writer is not None:
+                    video_writer.write(hud_bgr)
+                if args.render:
+                    cv2.imshow("AutonomousVehicle - DINOv2 + Laya Live HUD", hud_bgr)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == 27 or key == ord("q"):
+                        done = True
+
+            rgb, telemetry, _, done_step, info = env.step(control_action)
+            done = bool(done or done_step)
 
         episode_completions.append(float(info.get("route_completion", 0.0)))
         episode_arrived.append(bool(info.get("arrive_dest", False)))
         episode_crashed.append(bool(info.get("crash", False)))
 
+    if video_writer is not None:
+        video_writer.release()
+    if args.render:
+        cv2.destroyAllWindows()
     env.close()
 
     # Compute KPIs

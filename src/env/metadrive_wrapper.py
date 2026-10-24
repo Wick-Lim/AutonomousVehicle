@@ -117,8 +117,9 @@ class MetaDriveWrapper:
                 "MetaDrive is not installed. Install `metadrive-simulator` or run with `--mock`."
             ) from exc
 
+        use_render = bool(self.cfg.get("env", {}).get("use_render", False))
         md_config = {
-            "use_render": False,
+            "use_render": use_render,
             "image_observation": True,
             "stack_size": 1,
             "sensors": {

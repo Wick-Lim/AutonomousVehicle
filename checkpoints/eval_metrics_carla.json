@@ -1,0 +1,22 @@
+{
+  "simulator": "carla",
+  "episodes": 10,
+  "total_frames": 751,
+  "mean_latency_ms": 31.59,
+  "p95_latency_ms": 33.05,
+  "fps": 31.7,
+  "route_completion_rate_pct": 100.0,
+  "mean_route_progress_pct": 100.0,
+  "crash_free_rate_pct": 100.0,
+  "ece": 0.0,
+  "online_sim_ece": 0.0,
+  "shield_interventions": {
+    "rule1_emergency_brake": 9
+  },
+  "targets_met": {
+    "latency_le_40ms": true,
+    "route_completion_ge_85pct": true,
+    "crash_free_ge_95pct": true,
+    "ece_le_0_05": true
+  }
+}

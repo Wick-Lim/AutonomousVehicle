@@ -4,6 +4,7 @@ data/*
 checkpoints/*
 !checkpoints/.gitkeep
 !checkpoints/eval_metrics.json
+!checkpoints/eval_metrics_carla.json
 
 # Python cache & virtual environments
 __pycache__/
