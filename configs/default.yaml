@@ -1,0 +1,108 @@
+# ==============================================================================
+# AutonomousVehicle Default Configuration
+# Sub-40ms Non-Autoregressive Autonomous Driving powered by DINOv2 & Laya
+# ==============================================================================
+
+project:
+  name: "AutonomousVehicle"
+  seed: 42
+  device: "auto"           # "auto", "cuda", or "cpu"
+  use_mock: false          # Set true (or pass --mock) for lightweight dry-run without heavy downloads/OpenGL
+
+env:
+  camera_height: 196       # Vertical resolution (divisible by DINOv2 patch size 14 -> 14 patches)
+  camera_width: 392        # Horizontal wide resolution (divisible by 14 -> 28 patches)
+  crop_top_ratio: 0.25     # Crop upper sky region from raw simulator frame before resize
+  crop_bottom_ratio: 0.10  # Crop lower hood region from raw simulator frame before resize
+  decision_repeat: 5       # 20Hz control loop (50ms per step in 100Hz physics)
+  traffic_density: 0.10    # Traffic density (0.1 ~ 0.3)
+  map_blocks: 3            # Number of procedural road blocks per scenario
+  start_seed: 1000         # Training scenario start seed
+  eval_start_seed: 5000    # Unseen evaluation scenario start seed
+  eval_episodes: 50        # Number of unseen maps for Milestone 4 benchmark
+  max_episode_steps: 750   # Max steps per episode
+  lane_width: 3.5          # Standard MetaDrive lane width (m)
+
+model:
+  dino:
+    model_name: "facebook/dinov2-base"
+    patch_size: 14
+    embed_dim: 768
+    grid_h: 14             # 196 / 14
+    grid_w: 28             # 392 / 14
+    num_patches: 392       # 14 * 28
+    freeze: true
+
+  projector:
+    in_dim: 768
+    out_dim: 1024          # Matches Laya (ModernBERT-large) hidden size
+    hidden_dim: 1024
+    pool_h: 4              # AdaptiveAvgPool2d height
+    pool_w: 9              # AdaptiveAvgPool2d width (preserves horizontal aspect ratio)
+    num_visual_tokens: 36  # 4 * 9 spatial visual tokens
+    dropout: 0.1
+
+  laya:
+    model_name: "convaiinnovations/laya"
+    embed_dim: 1024
+    max_seq_len: 256
+    freeze: true
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+
+  primitives:
+    maneuver_options:
+      - "keep_lane"
+      - "change_left"
+      - "change_right"
+      - "follow_lead"
+    speed_levels:
+      0: 0.0               # Stop (0 km/h)
+      1: 20.0              # Slow (20 km/h - sharp curve / intersection)
+      2: 40.0              # Medium (40 km/h - normal cruising / merge)
+      3: 65.0              # High (65 km/h - clear highway)
+
+control:
+  safety_shield:
+    aeb_threshold: 0.70        # Rule 1: emergency_brake >= 0.70 -> immediate full brake (-1.0)
+    confidence_threshold: 0.80 # Rule 2: maneuver confidence < 0.80 -> reject lane change, fallback to keep_lane & speed - 1
+  lateral_pid:
+    kp: 0.45
+    ki: 0.01
+    kd: 0.18
+    heading_weight: 1.25
+  longitudinal_pid:
+    kp: 0.08
+    ki: 0.005
+    kd: 0.02
+
+data:
+  data_dir: "data"
+  train_split: 0.85
+  num_collect_frames: 50000
+  oversampling:
+    keep_lane_weight: 1.0
+    change_left_weight: 4.5
+    change_right_weight: 4.5
+    follow_lead_weight: 2.5
+    aeb_bonus_weight: 5.0
+
+train:
+  checkpoint_dir: "checkpoints"
+  projector_ckpt: "checkpoints/projector_best.pt"
+  temperature_ckpt: "checkpoints/temperature.pt"
+  batch_size: 32
+  num_workers: 0
+  epochs: 15
+  lr: 0.0003
+  weight_decay: 0.01
+  loss_weights:
+    maneuver: 1.0
+    speed_level: 1.0
+    emergency_brake: 2.0
+
+calibration:
+  num_bins: 15
+  max_iter: 100
+  lr: 0.05

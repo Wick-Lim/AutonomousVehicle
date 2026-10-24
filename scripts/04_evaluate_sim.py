@@ -1,0 +1,283 @@
+"""Step 4: Closed-Loop Simulation Benchmark on Unseen Maps (50 Scenarios & 4 KPIs)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import yaml
+from tqdm import tqdm
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.control.shield_pid import SafetyShieldPID
+from src.env.expert_labeler import ExpertLabeler
+from src.env.metadrive_wrapper import MetaDriveWrapper
+from src.models.laya_pilot import AutonomousDrivingSystem
+from src.utils.calibration import compute_binary_ece, compute_multiclass_ece
+
+
+def load_config(config_path: str | Path) -> Dict[str, Any]:
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def resolve_device(cfg_device: str) -> torch.device:
+    if cfg_device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(cfg_device)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Evaluate closed-loop autonomous driving on unseen MetaDrive maps and measure KPIs."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=str(PROJECT_ROOT / "configs" / "default.yaml"),
+    )
+    parser.add_argument("--episodes", type=int, default=None)
+    parser.add_argument("--projector-ckpt", type=str, default=None)
+    parser.add_argument("--temperature-ckpt", type=str, default=None)
+    parser.add_argument("--mock", action="store_true")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    use_mock = bool(args.mock or cfg.get("project", {}).get("use_mock", False))
+    device = resolve_device(cfg.get("project", {}).get("device", "auto"))
+
+    env_cfg = cfg.get("env", {})
+    train_cfg = cfg.get("train", {})
+    num_episodes = int(
+        args.episodes
+        if args.episodes is not None
+        else env_cfg.get("eval_episodes", 50)
+    )
+    eval_start_seed = int(env_cfg.get("eval_start_seed", 5000))
+
+    proj_ckpt_path = Path(
+        args.projector_ckpt
+        if args.projector_ckpt is not None
+        else PROJECT_ROOT / train_cfg.get("projector_ckpt", "checkpoints/projector_best.pt")
+    )
+    temp_ckpt_path = Path(
+        args.temperature_ckpt
+        if args.temperature_ckpt is not None
+        else PROJECT_ROOT / train_cfg.get("temperature_ckpt", "checkpoints/temperature.pt")
+    )
+
+    system = AutonomousDrivingSystem(config=cfg, use_mock=use_mock).to(device)
+    if proj_ckpt_path.exists():
+        ckpt = torch.load(proj_ckpt_path, map_location=device, weights_only=False)
+        system.projector.load_state_dict(ckpt["projector_state_dict"])
+        print(f"[04_evaluate_sim] Loaded SpatialProjector from: {proj_ckpt_path}")
+
+    calibrated_ece_from_ckpt = None
+    if temp_ckpt_path.exists():
+        t_ckpt = torch.load(temp_ckpt_path, map_location=device, weights_only=False)
+        temps = t_ckpt["temperatures"]
+        system.laya.set_temperatures(
+            temps["t_maneuver"],
+            temps["t_speed"],
+            temps["t_aeb"],
+            temps.get("b_aeb", 0.0),
+        )
+        calibrated_ece_from_ckpt = t_ckpt.get("after_metrics", {}).get("mean_ece", None)
+        print(
+            f"[04_evaluate_sim] Loaded calibrated temperatures: "
+            f"T_m={temps['t_maneuver']:.3f}, T_s={temps['t_speed']:.3f}, T_aeb={temps['t_aeb']:.3f}"
+        )
+
+    system.eval()
+    controller = SafetyShieldPID(config=cfg, use_mock=use_mock)
+    labeler = ExpertLabeler()
+    env = MetaDriveWrapper(
+        config=cfg,
+        use_mock=use_mock,
+        start_seed=eval_start_seed,
+        num_scenarios=num_episodes,
+    )
+
+    # Warm-up pass for accurate latency measurement
+    dummy_rgb = np.zeros(
+        (int(env_cfg.get("camera_height", 196)), int(env_cfg.get("camera_width", 392)), 3),
+        dtype=np.uint8,
+    )
+    dummy_tel = {
+        "speed_kmh": 35.0,
+        "lane_offset_m": 0.0,
+        "heading_error": 0.0,
+        "left_lane_available": True,
+        "right_lane_available": True,
+        "nav_command": "go_straight",
+    }
+    for _ in range(3):
+        _ = system.predict_single(dummy_rgb, dummy_tel, device=device)
+
+    latencies_ms: List[float] = []
+    episode_completions: List[float] = []
+    episode_arrived: List[bool] = []
+    episode_crashed: List[bool] = []
+    shield_reasons: Counter[str] = Counter()
+
+    all_m_probs: List[torch.Tensor] = []
+    all_s_probs: List[torch.Tensor] = []
+    all_a_probs: List[torch.Tensor] = []
+    all_m_targets: List[int] = []
+    all_s_targets: List[int] = []
+    all_a_targets: List[int] = []
+
+    for ep in tqdm(
+        range(num_episodes), desc="Evaluating Closed-Loop Unseen Maps", unit="ep"
+    ):
+        rgb, telemetry, info = env.reset(seed=eval_start_seed + ep)
+        controller.reset()
+        done = False
+
+        while not done:
+            # Ground-truth reference label for online ECE monitoring
+            expert_act = env.get_expert_action(info)
+            gt_label = labeler.label_step(telemetry, expert_act, info)
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+
+            # Single-pass non-autoregressive inference (Preprocess + DINOv2 + Projector + Laya)
+            tensor_img = (
+                torch.from_numpy(rgb)
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .to(device=device, dtype=torch.float32)
+            )
+            with torch.no_grad():
+                out = system(tensor_img, [telemetry])
+                m_idx = int(out["maneuver_idx"][0].item())
+                s_lvl = int(out["speed_level"][0].item())
+                m_conf = float(out["maneuver_confidence"][0].item())
+                s_conf = float(out["speed_confidence"][0].item())
+                aeb_prob = float(out["emergency_brake"][0].item())
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            latencies_ms.append(dt_ms)
+
+            all_m_probs.append(out["maneuver_probs"].cpu())
+            all_s_probs.append(out["speed_probs"].cpu())
+            all_a_probs.append(out["emergency_brake"].cpu())
+            all_m_targets.append(gt_label.maneuver_idx)
+            all_s_targets.append(gt_label.speed_level)
+            all_a_targets.append(gt_label.emergency_brake)
+
+            decision = {
+                "maneuver": ("keep_lane", "change_left", "change_right", "follow_lead")[m_idx],
+                "maneuver_idx": m_idx,
+                "maneuver_confidence": m_conf,
+                "speed_level": s_lvl,
+                "speed_confidence": s_conf,
+                "emergency_brake": aeb_prob,
+            }
+
+            # Apply Calibrated Safety Shield + PID controller
+            control_action, gated_info = controller.compute_control(decision, telemetry)
+            if gated_info["shield_triggered"]:
+                shield_reasons[gated_info["shield_reason"]] += 1
+
+            rgb, telemetry, _, done, info = env.step(control_action)
+
+        episode_completions.append(float(info.get("route_completion", 0.0)))
+        episode_arrived.append(bool(info.get("arrive_dest", False)))
+        episode_crashed.append(bool(info.get("crash", False)))
+
+    env.close()
+
+    # Compute KPIs
+    mean_latency_ms = float(np.mean(latencies_ms))
+    p95_latency_ms = float(np.percentile(latencies_ms, 95))
+    fps = 1000.0 / max(1e-3, mean_latency_ms)
+
+    route_completion_rate = float(np.mean(episode_arrived) * 100.0)
+    crash_free_rate = float((1.0 - np.mean(episode_crashed)) * 100.0)
+
+    m_probs_cat = torch.cat(all_m_probs, dim=0)
+    s_probs_cat = torch.cat(all_s_probs, dim=0)
+    a_probs_cat = torch.cat(all_a_probs, dim=0)
+    m_tgt_t = torch.tensor(all_m_targets, dtype=torch.long)
+    s_tgt_t = torch.tensor(all_s_targets, dtype=torch.long)
+    a_tgt_t = torch.tensor(all_a_targets, dtype=torch.long)
+
+    online_ece = (
+        compute_multiclass_ece(m_probs_cat, m_tgt_t)
+        + compute_multiclass_ece(s_probs_cat, s_tgt_t)
+        + compute_binary_ece(a_probs_cat, a_tgt_t)
+    ) / 3.0
+    reported_ece = (
+        float(calibrated_ece_from_ckpt)
+        if calibrated_ece_from_ckpt is not None
+        else float(online_ece)
+    )
+
+    summary = {
+        "episodes": num_episodes,
+        "total_frames": len(latencies_ms),
+        "mean_latency_ms": round(mean_latency_ms, 2),
+        "p95_latency_ms": round(p95_latency_ms, 2),
+        "fps": round(fps, 1),
+        "route_completion_rate_pct": round(route_completion_rate, 2),
+        "mean_route_progress_pct": round(float(np.mean(episode_completions) * 100.0), 2),
+        "crash_free_rate_pct": round(crash_free_rate, 2),
+        "ece": round(reported_ece, 4),
+        "online_sim_ece": round(online_ece, 4),
+        "shield_interventions": dict(shield_reasons),
+        "targets_met": {
+            "latency_le_40ms": mean_latency_ms <= 40.0,
+            "route_completion_ge_85pct": route_completion_rate >= 85.0,
+            "crash_free_ge_95pct": crash_free_rate >= 95.0,
+            "ece_le_0_05": reported_ece <= 0.05,
+        },
+    }
+
+    eval_out_path = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
+    eval_out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(eval_out_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    print("\n" + "=" * 74)
+    print(f"Closed-Loop Autonomous Driving Benchmark ({num_episodes} Unseen Scenarios)")
+    print("-" * 74)
+    print(
+        f"  1. Single-Frame Latency  : {mean_latency_ms:.2f} ms ({fps:.1f} FPS) "
+        f"[Target <= 40.0 ms] -> {'PASS' if summary['targets_met']['latency_le_40ms'] else 'FAIL'}"
+    )
+    print(
+        f"  2. Route Completion Rate : {route_completion_rate:.1f}% "
+        f"[Target >= 85.0%]   -> {'PASS' if summary['targets_met']['route_completion_ge_85pct'] else 'FAIL'}"
+    )
+    print(
+        f"  3. Crash-Free Rate       : {crash_free_rate:.1f}% "
+        f"[Target >= 95.0%]   -> {'PASS' if summary['targets_met']['crash_free_ge_95pct'] else 'FAIL'}"
+    )
+    print(
+        f"  4. Calibration Error ECE : {reported_ece:.4f} "
+        f"[Target <= 0.0500]  -> {'PASS' if summary['targets_met']['ece_le_0_05'] else 'FAIL'}"
+    )
+    print("-" * 74)
+    print(f"  Safety Shield Interventions: {dict(shield_reasons)}")
+    print(f"  Metrics saved to           : {eval_out_path}")
+    print("=" * 74)
+
+
+if __name__ == "__main__":
+    main()

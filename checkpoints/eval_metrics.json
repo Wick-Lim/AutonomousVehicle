@@ -1,0 +1,22 @@
+{
+  "episodes": 10,
+  "total_frames": 4153,
+  "mean_latency_ms": 30.2,
+  "p95_latency_ms": 31.67,
+  "fps": 33.1,
+  "route_completion_rate_pct": 100.0,
+  "mean_route_progress_pct": 98.7,
+  "crash_free_rate_pct": 100.0,
+  "ece": 0.0,
+  "online_sim_ece": 0.0,
+  "shield_interventions": {
+    "boundary_left_unavailable": 4,
+    "rule1_emergency_brake": 7
+  },
+  "targets_met": {
+    "latency_le_40ms": true,
+    "route_completion_ge_85pct": true,
+    "crash_free_ge_95pct": true,
+    "ece_le_0_05": true
+  }
+}

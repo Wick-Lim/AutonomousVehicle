@@ -1,0 +1,44 @@
+# Collected dataset & model checkpoints
+data/*
+!data/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+!checkpoints/eval_metrics.json
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+/.venv/
+/venv/
+/ENV/
+/env/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs & temporary artifacts
+logs/
+*.log
