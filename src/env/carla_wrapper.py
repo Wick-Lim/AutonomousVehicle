@@ -79,11 +79,14 @@ class CarlaWrapper:
         self._traffic_manager: Any = None
         self._ego_vehicle: Any = None
         self._camera_sensor: Any = None
+        self._hd_camera_sensor: Any = None
         self._collision_sensor: Any = None
         self._lane_invasion_sensor: Any = None
         self._behavior_agent: Any = None
         self._npc_actors: List[Any] = []
         self._image_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._hd_image_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._last_hd_rgb: Optional[np.ndarray] = None
         self._collision_detected: bool = False
         self._out_of_road_detected: bool = False
 
@@ -119,10 +122,14 @@ class CarlaWrapper:
 
             self._carla_mod = carla
             self._client = carla.Client(self.host, self.port)
-            self._client.set_timeout(4.0)
+            self._client.set_timeout(15.0)
             self._world = self._client.get_world()
             current_map_name = self._world.get_map().name.split("/")[-1]
-            if self.town and current_map_name != self.town:
+            if (
+                self.town
+                and self.town.lower() != "current"
+                and current_map_name != self.town
+            ):
                 self._world = self._client.load_world(self.town)
             self._map = self._world.get_map()
 
@@ -134,7 +141,13 @@ class CarlaWrapper:
             self._traffic_manager = self._client.get_trafficmanager(self.tm_port)
             self._traffic_manager.set_synchronous_mode(True)
             self._traffic_manager.set_global_distance_to_leading_vehicle(2.5)
-        except Exception:
+            print(
+                f"[CarlaWrapper] Connected to live CARLA server at {self.host}:{self.port} (Map: {current_map_name})"
+            )
+        except Exception as exc:
+            print(
+                f"[CarlaWrapper] Live CARLA server not detected at {self.host}:{self.port} ({exc}); using fallback."
+            )
             self._client = None
             self._world = None
             self.use_mock = True
@@ -185,6 +198,7 @@ class CarlaWrapper:
         """Destroy sensors, ego vehicle, and NPC actors in live CARLA world."""
         for sensor in (
             self._camera_sensor,
+            self._hd_camera_sensor,
             self._collision_sensor,
             self._lane_invasion_sensor,
         ):
@@ -195,6 +209,7 @@ class CarlaWrapper:
                 except Exception:
                     pass
         self._camera_sensor = None
+        self._hd_camera_sensor = None
         self._collision_sensor = None
         self._lane_invasion_sensor = None
 
@@ -212,28 +227,74 @@ class CarlaWrapper:
                 pass
         self._npc_actors.clear()
 
-        while not self._image_queue.empty():
-            try:
-                self._image_queue.get_nowait()
-            except Exception:
-                break
+        for q in (self._image_queue, self._hd_image_queue):
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except Exception:
+                    break
+
+    def _update_spectator_chase_cam(self) -> None:
+        """Position the main CarlaUE4.exe 3D Spectator camera behind the ego vehicle."""
+        if self._world is None or self._ego_vehicle is None:
+            return
+        try:
+            carla = self._carla_mod
+            ego_tf = self._ego_vehicle.get_transform()
+            fwd = ego_tf.get_forward_vector()
+            cam_loc = carla.Location(
+                x=ego_tf.location.x - fwd.x * 6.5,
+                y=ego_tf.location.y - fwd.y * 6.5,
+                z=ego_tf.location.z + 2.8,
+            )
+            cam_rot = carla.Rotation(
+                pitch=-12.0,
+                yaw=ego_tf.rotation.yaw,
+                roll=0.0,
+            )
+            self._world.get_spectator().set_transform(carla.Transform(cam_loc, cam_rot))
+        except Exception:
+            pass
 
     def _spawn_real_carla_episode(self, seed: int) -> None:
-        """Spawn ego vehicle, RGB camera, collision sensor, and NPC traffic in CARLA."""
+        """Spawn ego vehicle, RGB camera, HD chase camera, collision sensor, and NPC traffic in CARLA."""
         carla = self._carla_mod
         self._cleanup_carla_actors()
         self._collision_detected = False
         self._out_of_road_detected = False
         self._progress = 0.0
+        self._last_hd_rgb = None
 
         bp_lib = self._world.get_blueprint_library()
         spawn_points = list(self._map.get_spawn_points())
         rng = np.random.default_rng(seed)
         rng.shuffle(spawn_points)
 
+        four_wheel_bps = [
+            bp
+            for bp in bp_lib.filter("vehicle.*")
+            if bp.has_attribute("number_of_wheels")
+            and int(bp.get_attribute("number_of_wheels")) == 4
+        ]
         ego_bps = bp_lib.filter(self.vehicle_filter)
-        ego_bp = ego_bps[0] if len(ego_bps) > 0 else bp_lib.filter("vehicle.*")[0]
-        ego_bp.set_attribute("role_name", "hero")
+        if len(ego_bps) == 0:
+            for preferred in (
+                "vehicle.lincoln.mkz_2020",
+                "vehicle.tesla.model3",
+                "vehicle.audi.etron",
+                "vehicle.ford.mustang",
+            ):
+                cand = bp_lib.filter(preferred)
+                if len(cand) > 0:
+                    ego_bps = cand
+                    break
+        ego_bp = (
+            ego_bps[0]
+            if len(ego_bps) > 0
+            else (four_wheel_bps[0] if len(four_wheel_bps) > 0 else bp_lib.filter("vehicle.*")[0])
+        )
+        if ego_bp.has_attribute("role_name"):
+            ego_bp.set_attribute("role_name", "hero")
 
         for sp in spawn_points:
             self._ego_vehicle = self._world.try_spawn_actor(ego_bp, sp)
@@ -242,7 +303,7 @@ class CarlaWrapper:
         if self._ego_vehicle is None:
             raise RuntimeError("Failed to spawn CARLA ego vehicle.")
 
-        # Attach 392x196 Wide RGB Camera
+        # 1. Attach 392x196 Wide RGB Camera (for DINOv2 + Laya)
         cam_bp = bp_lib.find("sensor.camera.rgb")
         cam_bp.set_attribute("image_size_x", str(self.camera_width))
         cam_bp.set_attribute("image_size_y", str(self.camera_height))
@@ -260,6 +321,27 @@ class CarlaWrapper:
 
         self._camera_sensor.listen(_on_image)
 
+        # 2. Attach 960x540 HD 3rd-Person Chase Camera (for crisp HUD & MP4 recording)
+        hd_bp = bp_lib.find("sensor.camera.rgb")
+        hd_bp.set_attribute("image_size_x", "960")
+        hd_bp.set_attribute("image_size_y", "540")
+        hd_bp.set_attribute("fov", "90.0")
+        hd_transform = carla.Transform(
+            carla.Location(x=-6.2, z=2.6),
+            carla.Rotation(pitch=-12.0),
+        )
+        self._hd_camera_sensor = self._world.spawn_actor(
+            hd_bp, hd_transform, attach_to=self._ego_vehicle
+        )
+
+        def _on_hd_image(carla_img: Any) -> None:
+            arr = np.frombuffer(carla_img.raw_data, dtype=np.uint8)
+            arr = arr.reshape((carla_img.height, carla_img.width, 4))
+            rgb = arr[:, :, :3][:, :, ::-1].copy()
+            self._hd_image_queue.put(rgb)
+
+        self._hd_camera_sensor.listen(_on_hd_image)
+
         # Attach Collision Sensor
         col_bp = bp_lib.find("sensor.other.collision")
         self._collision_sensor = self._world.spawn_actor(
@@ -270,11 +352,7 @@ class CarlaWrapper:
         )
 
         # Spawn NPC traffic vehicles
-        vehicle_bps = [
-            bp
-            for bp in bp_lib.filter("vehicle.*")
-            if int(bp.get_attribute("number_of_wheels")) == 4
-        ]
+        vehicle_bps = four_wheel_bps if len(four_wheel_bps) > 0 else list(bp_lib.filter("vehicle.*"))
         for sp in spawn_points[1 : 1 + self.num_npc_vehicles]:
             npc_bp = vehicle_bps[int(rng.integers(0, len(vehicle_bps)))]
             npc = self._world.try_spawn_actor(npc_bp, sp)
@@ -294,6 +372,7 @@ class CarlaWrapper:
             self._ego_vehicle.set_autopilot(False, self.tm_port)
 
         self._world.tick()
+        self._update_spectator_chase_cam()
         loc = self._ego_vehicle.get_location()
         self._prev_location = (float(loc.x), float(loc.y), float(loc.z))
 
@@ -307,6 +386,12 @@ class CarlaWrapper:
                 (self.camera_height, self.camera_width, 3), dtype=np.uint8
             )
         rgb = self.preprocess_frame(raw_rgb)
+
+        try:
+            while not self._hd_image_queue.empty():
+                self._last_hd_rgb = self._hd_image_queue.get_nowait()
+        except Exception:
+            pass
 
         v = self._ego_vehicle
         vel = v.get_velocity()
@@ -441,6 +526,7 @@ class CarlaWrapper:
             "seed": self._current_seed,
             "simulator": "carla",
             "scenario_event": "real_carla",
+            "hd_rgb": self._last_hd_rgb,
             "lead_distance_m": round(lead_distance_m, 2),
             "lead_speed_kmh": round(lead_speed_kmh, 2),
             "road_curvature": round(road_curvature, 4),
@@ -506,6 +592,7 @@ class CarlaWrapper:
             )
             self._ego_vehicle.apply_control(ctrl)
             self._world.tick()
+            self._update_spectator_chase_cam()
             rgb, telemetry, info = self._extract_real_carla_state()
             done = bool(
                 info["crash"]

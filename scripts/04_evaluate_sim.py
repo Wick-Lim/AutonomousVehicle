@@ -53,15 +53,16 @@ def render_hud_frame(
 ) -> np.ndarray:
     """Render an upscaled 784x532 BGR HUD frame overlaying Laya decisions, telemetry, and Safety Shield."""
     cam_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    cam_up = cv2.resize(cam_bgr, (784, 392), interpolation=cv2.INTER_NEAREST)
-
-    # Draw subtle 4x9 spatial pooling grid overlay on camera view
-    for gx in range(1, 9):
-        x = int(gx * 784 / 9)
-        cv2.line(cam_up, (x, 0), (x, 392), (55, 70, 55), 1)
-    for gy in range(1, 4):
-        y = int(gy * 392 / 4)
-        cv2.line(cam_up, (0, y), (784, y), (55, 70, 55), 1)
+    hd_rgb = info.get("hd_rgb")
+    if isinstance(hd_rgb, np.ndarray) and hd_rgb.ndim == 3:
+        hd_bgr = cv2.cvtColor(hd_rgb, cv2.COLOR_RGB2BGR)
+        cam_up = cv2.resize(hd_bgr, (784, 392), interpolation=cv2.INTER_AREA)
+        pip = cv2.resize(cam_bgr, (235, 118), interpolation=cv2.INTER_LINEAR)
+        cv2.rectangle(cam_up, (784 - 245, 8), (784 - 8, 130), (20, 24, 30), -1)
+        cam_up[10:128, 784 - 243 : 784 - 8] = pip
+        cv2.rectangle(cam_up, (784 - 245, 8), (784 - 8, 130), (90, 180, 255), 1)
+    else:
+        cam_up = cv2.resize(cam_bgr, (784, 392), interpolation=cv2.INTER_LINEAR)
 
     panel = np.full((140, 784, 3), (24, 26, 32), dtype=np.uint8)
     cv2.line(panel, (0, 0), (784, 0), (90, 180, 255), 2)

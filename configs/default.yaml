@@ -27,7 +27,7 @@ env:
     host: "127.0.0.1"      # CARLA Unreal server IP
     port: 2000             # CARLA server RPC port
     tm_port: 8000          # CARLA TrafficManager port
-    town: "Town03"         # CARLA town map (Town01 ~ Town10HD)
+    town: "current"        # Use active CARLA 0.9.16 world (Town10HD_Opt) or specify Town01~Town10HD_Opt
     vehicle_blueprint: "vehicle.tesla.model3"
     camera_fov: 100.0
     fixed_delta_seconds: 0.05  # 20Hz synchronous simulation step
