@@ -348,8 +348,11 @@ def main() -> None:
                 if video_writer is not None:
                     video_writer.write(hud_bgr)
                 if args.render:
-                    cv2.imshow("AutonomousVehicle - DINOv2 + Laya Live HUD", hud_bgr)
-                    key = cv2.waitKey(1) & 0xFF
+                    win_name = "AutonomousVehicle - DINOv2 + Laya Live HUD"
+                    cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
+                    cv2.setWindowProperty(win_name, cv2.WND_PROP_TOPMOST, 1)
+                    cv2.imshow(win_name, hud_bgr)
+                    key = cv2.waitKey(25) & 0xFF
                     if key == 27 or key == ord("q"):
                         done = True
 
