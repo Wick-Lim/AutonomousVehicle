@@ -17,8 +17,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.env import create_driving_env
 from src.env.expert_labeler import ExpertLabeler
-from src.env.metadrive_wrapper import MetaDriveWrapper
 
 
 def load_config(config_path: str | Path) -> Dict[str, Any]:
@@ -49,6 +49,13 @@ def main() -> None:
         help="Output dataset directory (overrides config data.data_dir).",
     )
     parser.add_argument(
+        "--simulator",
+        type=str,
+        default=None,
+        choices=["metadrive", "carla"],
+        help="Simulator backend ('metadrive' or 'carla').",
+    )
+    parser.add_argument(
         "--mock",
         action="store_true",
         help="Use lightweight kinematic/visual mock simulator without OpenGL.",
@@ -57,6 +64,7 @@ def main() -> None:
 
     cfg = load_config(args.config)
     use_mock = bool(args.mock or cfg.get("project", {}).get("use_mock", False))
+    simulator_name = (args.simulator or cfg.get("env", {}).get("simulator", "metadrive")).lower()
     num_frames = int(
         args.num_frames
         if args.num_frames is not None
@@ -71,10 +79,11 @@ def main() -> None:
     images_dir.mkdir(parents=True, exist_ok=True)
     meta_path = data_dir / "metadata.jsonl"
 
-    env = MetaDriveWrapper(
+    env = create_driving_env(
         config=cfg,
         use_mock=use_mock,
         start_seed=int(cfg.get("env", {}).get("start_seed", 1000)),
+        simulator=simulator_name,
     )
     labeler = ExpertLabeler()
 
@@ -83,7 +92,7 @@ def main() -> None:
     aeb_counts: Counter[int] = Counter()
 
     print(
-        f"[01_collect_data] Collecting {num_frames} frames into '{data_dir}' (mock={use_mock})..."
+        f"[01_collect_data] Collecting {num_frames} frames from '{simulator_name}' into '{data_dir}' (mock={use_mock})..."
     )
 
     collected = 0

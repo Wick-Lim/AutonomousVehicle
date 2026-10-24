@@ -120,16 +120,23 @@ class SafetyShieldPID:
         lead_distance_m = float(telemetry.get("lead_distance_m", 60.0))
         lead_speed_kmh = float(telemetry.get("lead_speed_kmh", 60.0))
         current_speed_kmh = float(telemetry.get("speed_kmh", 0.0))
+        traffic_light = str(telemetry.get("traffic_light", "green"))
+        hazard_source = str(telemetry.get("hazard_source", "none"))
 
         gated_maneuver = raw_maneuver
         gated_speed_level = raw_speed_level
         shield_triggered = False
         shield_reason = "none"
 
-        # Rule 1: Emergency Brake Priority (emergency_brake >= 0.70 or physical TTC hazard)
-        if aeb_prob >= self.aeb_threshold or (
-            lead_distance_m <= 11.5
-            and current_speed_kmh > max(6.0, lead_speed_kmh + 6.0)
+        # Rule 1: Emergency Brake Priority (emergency_brake >= 0.70, CARLA red light/pedestrian, or physical TTC hazard)
+        if (
+            aeb_prob >= self.aeb_threshold
+            or traffic_light == "red"
+            or (hazard_source == "pedestrian" and lead_distance_m <= 16.0)
+            or (
+                lead_distance_m <= 11.5
+                and current_speed_kmh > max(6.0, lead_speed_kmh + 6.0)
+            )
         ):
             gated_maneuver = "keep_lane"
             gated_speed_level = 0
@@ -237,4 +244,18 @@ class SafetyShieldPID:
 
         gated["steering"] = steering
         gated["throttle_brake"] = throttle_brake
+        gated["carla_control"] = self.to_carla_control(steering, throttle_brake)
         return (steering, throttle_brake), gated
+
+    @staticmethod
+    def to_carla_control(steering: float, throttle_brake: float) -> Dict[str, Any]:
+        """Convert `[steering, throttle_brake]` in `[-1, 1]` to CARLA `VehicleControl` dict."""
+        steer = float(np.clip(steering, -1.0, 1.0))
+        tb = float(np.clip(throttle_brake, -1.0, 1.0))
+        return {
+            "steer": round(steer, 4),
+            "throttle": round(tb if tb >= 0.0 else 0.0, 4),
+            "brake": round(-tb if tb < 0.0 else 0.0, 4),
+            "hand_brake": False,
+            "reverse": False,
+        }

@@ -256,10 +256,11 @@ class LayaPilot(nn.Module):
         spd = int(round(float(telemetry.get("speed_kmh", 0.0))))
         off = round(float(telemetry.get("lane_offset_m", 0.0)), 1)
         nav = str(telemetry.get("nav_command", "go_straight"))[0]
+        tl = str(telemetry.get("traffic_light", "green"))[0]
         la = int(bool(telemetry.get("left_lane_available", False)))
         ra = int(bool(telemetry.get("right_lane_available", False)))
         prompt = (
-            f"v={spd},y={off},l={la},r={ra},n={nav} "
+            f"v={spd},y={off},l={la},r={ra},n={nav},t={tl} "
             f"M:{mask_tok}{mask_tok}{mask_tok}{mask_tok} "
             f"S:{mask_tok}{mask_tok}{mask_tok}{mask_tok} "
             f"B:{mask_tok}"
@@ -281,8 +282,13 @@ class LayaPilot(nn.Module):
             lead_dist = float(t.get("lead_distance_m", 60.0))
             spd_kmh = float(t.get("speed_kmh", 0.0))
             road_curv = abs(float(t.get("road_curvature", 0.0)))
-            is_aeb = (lead_dist < 9.5 and spd_kmh > 15.0) or (
-                self.use_mock and lead_dist <= 13.5
+            traffic_light = str(t.get("traffic_light", "green"))
+            hazard_source = str(t.get("hazard_source", "none"))
+            is_aeb = (
+                traffic_light == "red"
+                or (hazard_source == "pedestrian" and lead_dist <= 16.0)
+                or (lead_dist < 9.5 and spd_kmh > 15.0)
+                or (self.use_mock and lead_dist <= 13.5)
             )
             aeb_hazard = 1.0 if is_aeb else 0.0
             if self.use_mock:

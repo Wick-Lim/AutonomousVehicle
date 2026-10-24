@@ -10,6 +10,7 @@ project:
   use_mock: false          # Set true (or pass --mock) for lightweight dry-run without heavy downloads/OpenGL
 
 env:
+  simulator: "metadrive"   # "metadrive" or "carla" (can also override via --simulator CLI flag)
   camera_height: 196       # Vertical resolution (divisible by DINOv2 patch size 14 -> 14 patches)
   camera_width: 392        # Horizontal wide resolution (divisible by 14 -> 28 patches)
   crop_top_ratio: 0.25     # Crop upper sky region from raw simulator frame before resize
@@ -21,7 +22,18 @@ env:
   eval_start_seed: 5000    # Unseen evaluation scenario start seed
   eval_episodes: 50        # Number of unseen maps for Milestone 4 benchmark
   max_episode_steps: 750   # Max steps per episode
-  lane_width: 3.5          # Standard MetaDrive lane width (m)
+  lane_width: 3.5          # Standard lane width (m)
+  carla:
+    host: "127.0.0.1"      # CARLA Unreal server IP
+    port: 2000             # CARLA server RPC port
+    tm_port: 8000          # CARLA TrafficManager port
+    town: "Town03"         # CARLA town map (Town01 ~ Town10HD)
+    vehicle_blueprint: "vehicle.tesla.model3"
+    camera_fov: 100.0
+    fixed_delta_seconds: 0.05  # 20Hz synchronous simulation step
+    num_npc_vehicles: 25
+    num_pedestrians: 15
+    target_route_distance_m: 180.0
 
 model:
   dino:

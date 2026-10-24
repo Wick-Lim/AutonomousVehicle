@@ -21,8 +21,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.control.shield_pid import SafetyShieldPID
+from src.env import create_driving_env
 from src.env.expert_labeler import ExpertLabeler
-from src.env.metadrive_wrapper import MetaDriveWrapper
 from src.models.laya_pilot import AutonomousDrivingSystem
 from src.utils.calibration import compute_binary_ece, compute_multiclass_ece
 
@@ -50,11 +50,19 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--projector-ckpt", type=str, default=None)
     parser.add_argument("--temperature-ckpt", type=str, default=None)
+    parser.add_argument(
+        "--simulator",
+        type=str,
+        default=None,
+        choices=["metadrive", "carla"],
+        help="Simulator backend ('metadrive' or 'carla').",
+    )
     parser.add_argument("--mock", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     use_mock = bool(args.mock or cfg.get("project", {}).get("use_mock", False))
+    simulator_name = (args.simulator or cfg.get("env", {}).get("simulator", "metadrive")).lower()
     device = resolve_device(cfg.get("project", {}).get("device", "auto"))
 
     env_cfg = cfg.get("env", {})
@@ -102,11 +110,12 @@ def main() -> None:
     system.eval()
     controller = SafetyShieldPID(config=cfg, use_mock=use_mock)
     labeler = ExpertLabeler()
-    env = MetaDriveWrapper(
+    env = create_driving_env(
         config=cfg,
         use_mock=use_mock,
         start_seed=eval_start_seed,
         num_scenarios=num_episodes,
+        simulator=simulator_name,
     )
 
     # Warm-up pass for accurate latency measurement
@@ -230,6 +239,7 @@ def main() -> None:
     )
 
     summary = {
+        "simulator": simulator_name,
         "episodes": num_episodes,
         "total_frames": len(latencies_ms),
         "mean_latency_ms": round(mean_latency_ms, 2),
@@ -249,13 +259,18 @@ def main() -> None:
         },
     }
 
-    eval_out_path = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
+    eval_filename = (
+        "eval_metrics_carla.json" if simulator_name == "carla" else "eval_metrics.json"
+    )
+    eval_out_path = PROJECT_ROOT / "checkpoints" / eval_filename
     eval_out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(eval_out_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     print("\n" + "=" * 74)
-    print(f"Closed-Loop Autonomous Driving Benchmark ({num_episodes} Unseen Scenarios)")
+    print(
+        f"Closed-Loop Autonomous Driving Benchmark [{simulator_name.upper()}] ({num_episodes} Unseen Scenarios)"
+    )
     print("-" * 74)
     print(
         f"  1. Single-Frame Latency  : {mean_latency_ms:.2f} ms ({fps:.1f} FPS) "

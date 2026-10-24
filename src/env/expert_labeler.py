@@ -71,15 +71,20 @@ class ExpertLabeler:
         right_avail = bool(telemetry.get("right_lane_available", False))
         nav_command = str(telemetry.get("nav_command", "go_straight"))
 
-        lead_distance_m = float(info.get("lead_distance_m", 60.0))
-        road_curvature = abs(float(info.get("road_curvature", 0.0)))
+        lead_distance_m = float(info.get("lead_distance_m", telemetry.get("lead_distance_m", 60.0)))
+        road_curvature = abs(float(info.get("road_curvature", telemetry.get("road_curvature", 0.0))))
         scenario_event = str(info.get("scenario_event", ""))
+        traffic_light = str(telemetry.get("traffic_light", info.get("traffic_light", "green")))
+        hazard_source = str(telemetry.get("hazard_source", info.get("hazard_source", "none")))
 
-        # 1. Determine emergency_brake (noul: 0 or 1)
+        # 1. Determine emergency_brake (noul: 0 or 1) - includes CARLA red light & pedestrian crosswalk AEB
+        is_real_sim = scenario_event in ("real_metadrive", "real_carla")
         is_aeb = (
             scenario_event == "emergency_brake"
+            or traffic_light == "red"
+            or (hazard_source == "pedestrian" and lead_distance_m <= 16.0)
             or (
-                scenario_event != "real_metadrive"
+                not is_real_sim
                 and throttle_brake <= self.aeb_decel_thresh
                 and lead_distance_m <= self.aeb_distance_thresh_m
             )
@@ -96,14 +101,14 @@ class ExpertLabeler:
         elif is_aeb:
             maneuver = "follow_lead"
         elif (
-            scenario_event != "real_metadrive"
+            not is_real_sim
             and steering >= self.lane_change_steer_thresh
             and left_avail
             and road_curvature < self.curve_curvature_thresh
         ):
             maneuver = "change_left"
         elif (
-            scenario_event != "real_metadrive"
+            not is_real_sim
             and steering <= -self.lane_change_steer_thresh
             and right_avail
             and road_curvature < self.curve_curvature_thresh

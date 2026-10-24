@@ -10,11 +10,11 @@
 
 | 단계 | 모듈명 | 세부 기술 규격 | 입력 (Input) | 출력 (Output) | 학습 여부 |
 | --- | --- | --- | --- | --- | --- |
-| **1. 환경** | `MetaDriveWrapper` | 절차적 도로 생성 및 주변 트래픽 시뮬레이션 | `[Steering, Throttle/Brake]` | $196 \times 392$ 와이드 RGB + 정형 텔레메트리 JSON | 환경 (고정) |
+| **1. 환경** | `MetaDriveWrapper` / `CarlaWrapper` | 절차적 고속도로(MetaDrive) 및 도심 교차로·신호등·보행자(CARLA) 시뮬레이션 | `[Steering, Throttle/Brake]` / `carla.VehicleControl` | $196 \times 392$ 와이드 RGB + 정형 텔레메트리 JSON | 환경 (고정) |
 | **2. 시각 인지** | `DINOv2Backbone` | `facebook/dinov2-base` (86M), 패치 크기 $14 \times 14$ | $(B, 3, 196, 392)$ RGB 텐서 | $14 \times 28 = 392$개 패치 특징 벡터 (`768`차원) | **동결 (Freeze)** |
 | **3. 공간 정렬** | `SpatialProjector` | `AdaptiveAvgPool2d(4, 9)` + 2D 위치 임베딩 + 2-Layer MLP | $(B, 392, 768)$ 패치 벡터 | 가로 해상도가 보존된 **36개 공간 시각 토큰 (`1024`차원)** | **집중 학습 (~1.85M)** |
 | **4. 전술 판단** | `LayaPilot` | `convaiinnovations/laya` (ModernBERT 421M) | `[CLS]` + 36개 시각 토큰 + 텔레메트리 JSON/마커 (`inputs_embeds`) | `maneuver`(`choice`), `speed_level`(`score`), `emergency_brake`(`noul`) 및 신뢰도 | **동결 (Freeze)** *(LoRA 옵션)* |
-| **5. 물리 제어** | `SafetyShieldPID` | 신뢰도 게이팅 안전 실드 + 횡/종방향 PID 제어기 | Laya 의사결정 및 보정 확률 | 최종 `[Steering (-1~1), Throttle/Brake (-1~1)]` | 규칙 기반 (Rule-based) |
+| **5. 물리 제어** | `SafetyShieldPID` | 신뢰도 게이팅 안전 실드 + 횡/종방향 PID 제어기 | Laya 의사결정 및 보정 확률 | 최종 `[Steering (-1~1), Throttle/Brake (-1~1)]` / `VehicleControl` | 규칙 기반 (Rule-based) |
 
 ---
 
@@ -28,6 +28,7 @@
   * `heading_error`: 차선 진행 방향과 차량 헤딩 각도 오차 (rad)
   * `left_lane_available` / `right_lane_available`: 좌/우측 차선 존재 여부 (Boolean)
   * `nav_command`: 내비게이션 안내 (`go_straight`, `turn_left`, `turn_right`, `merge`)
+  * `traffic_light` / `hazard_source`: 도심 신호등 상태 (`green`, `yellow`, `red`) 및 위험 요인 (`none`, `vehicle`, `pedestrian`, `red_light` — CARLA 확장 지원)
 
 ### 2.2. Laya 의사결정 프리미티브 (20Hz, 50ms 주기 단일 패스 출력)
 * **`maneuver` (`choice`):** `keep_lane` | `change_left` | `change_right` | `follow_lead`
@@ -35,7 +36,7 @@
 * **`emergency_brake` (`noul`):** $0.0 \sim 1.0$ 사이의 온도 보정된 긴급 제동 $P(\text{True})$ 확률값
 
 ### 2.3. 안전 게이팅 정책 (Safety Gating Policy)
-1. **Rule 1 (긴급 제동 우선):** `emergency_brake >= 0.70`이면 `maneuver` 결과와 무관하게 즉각 최대 제동(`Brake = -1.0`) 실행.
+1. **Rule 1 (긴급 제동 우선):** `emergency_brake >= 0.70`, 도심 적색 신호(`traffic_light == "red"`), 또는 근접 보행자(`hazard_source == "pedestrian"`) 감지 시 `maneuver` 결과와 무관하게 즉각 최대 제동(`Brake = -1.0`) 실행.
 2. **Rule 2 (신뢰도 폴백):** `maneuver` 1순위 선택지의 `confidence < 0.80`이면 차선 변경 명령(`change_left`/`change_right`)을 기각하고 강제로 `keep_lane` 및 목표 속도 1단계 하향으로 전환.
 
 ---
@@ -62,7 +63,17 @@ python scripts/03_calibrate.py
 python scripts/04_evaluate_sim.py --episodes 50
 ```
 
-### 3.3. 로컬 빠른 검증 모드 (`--mock` Dry-Run)
+### 3.3. CARLA 시뮬레이터 확장 모드 (`--simulator carla`)
+동일한 DINOv2 + SpatialProjector + Laya + SafetyShieldPID 파이프라인을 그대로 유지하면서 `--simulator carla` 플래그로 **CARLA (0.9.14 / 0.9.15+)** 도심 환경(신호등·횡단보도·보행자·`BehaviorAgent` 전문가·`carla.VehicleControl` 물리 제어)을 구동할 수 있습니다 (`configs/default.yaml`의 `env.carla` 블록에서 `host`, `port`, `town` 설정 가능, CARLA 서버 미실행 시 내장 도심 시뮬레이터로 자동 폴백):
+```bash
+# CARLA 전문가(BehaviorAgent) 주행 데이터 수집
+python scripts/01_collect_data.py --simulator carla --num-frames 10000
+
+# CARLA 도심 시나리오 실시간 폐루프 자율주행 및 KPI 평가
+python scripts/04_evaluate_sim.py --simulator carla --episodes 10
+```
+
+### 3.4. 로컬 빠른 검증 모드 (`--mock` Dry-Run)
 대용량 가중치 다운로드나 OpenGL 디스플레이 없이도 전체 텐서 파이프라인과 학습/보정/폐루프 제어를 즉시 검증할 수 있습니다:
 ```bash
 python scripts/01_collect_data.py --mock --num-frames 1200
@@ -83,8 +94,10 @@ AutonomousVehicle/
 ├── checkpoints/                 # 학습된 Spatial Projector 가중치 및 보정된 Temperature 값
 ├── src/
 │   ├── env/
+│   │   ├── __init__.py          # 시뮬레이터 팩토리 (create_driving_env: metadrive | carla)
 │   │   ├── metadrive_wrapper.py # MetaDrive 환경 초기화, 196x392 이미지 및 텔레메트리 추출
-│   │   └── expert_labeler.py    # 전문가(IDMPolicy)의 물리 액션을 Laya 정답 라벨로 변환하는 규칙
+│   │   ├── carla_wrapper.py     # CARLA 0.9.x 동기 모드(20Hz), 196x392 RGB/충돌 센서, 신호등/보행자/웨이포인트 추출
+│   │   └── expert_labeler.py    # 전문가(IDMPolicy / BehaviorAgent) 액션을 Laya 정답 라벨로 변환하는 규칙
 │   ├── models/
 │   │   ├── dino_backbone.py     # DINOv2 로드 및 패치 특징 추출
 │   │   ├── spatial_projector.py # 4x9 Adaptive Pooling + 2D Pos Embed + MLP

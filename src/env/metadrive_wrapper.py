@@ -27,6 +27,8 @@ class TelemetryState:
     lead_speed_kmh: float = 60.0
     road_curvature: float = 0.0
     expert_maneuver: Optional[str] = None
+    traffic_light: str = "green"
+    hazard_source: str = "none"
 
     def to_json_dict(self) -> Dict[str, Any]:
         """Convert telemetry to a clean, rounded dictionary for JSON serialization into Laya."""
@@ -41,6 +43,8 @@ class TelemetryState:
             "lead_speed_kmh": round(float(self.lead_speed_kmh), 2),
             "road_curvature": round(float(self.road_curvature), 4),
             "expert_maneuver": self.expert_maneuver,
+            "traffic_light": str(self.traffic_light),
+            "hazard_source": str(self.hazard_source),
         }
 
 
