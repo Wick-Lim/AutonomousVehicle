@@ -1,10 +1,10 @@
 {
   "simulator": "carla",
-  "episodes": 5,
-  "total_frames": 888,
-  "mean_latency_ms": 33.68,
-  "p95_latency_ms": 35.45,
-  "fps": 29.7,
+  "episodes": 10,
+  "total_frames": 2004,
+  "mean_latency_ms": 33.84,
+  "p95_latency_ms": 35.68,
+  "fps": 29.5,
   "route_completion_rate_pct": 100.0,
   "mean_route_progress_pct": 100.0,
   "driving_score_pct": 100.0,
@@ -13,40 +13,80 @@
   "online_sim_ece": 0.0,
   "e2e_trajectory_waypoints": 6,
   "e2e_trajectory_horizon_s": 3.0,
-  "vision_aux_lead_mae_m": 3.1,
+  "vision_aux_lead_mae_m": 3.58,
   "fsd_scenarios_tested": [
     "FSD-1_Intersection_Turn",
     "FSD-2_Dynamic_Overtake_Left",
     "FSD-3_Pedestrian_Crosswalk_AEB",
     "FSD-4_Urban_ACC_Follow",
-    "FSD-5_MultiBlock_Overtake_Right"
+    "FSD-5_MultiBlock_Overtake_Right",
+    "FSD-6_StopAndGo_Lead_Braking",
+    "FSD-7_BlindSpot_Blocked_Overtake",
+    "FSD-8_Construction_Zone_Bypass_Right",
+    "FSD-9_Night_Headlight_Pedestrian_AEB",
+    "FSD-10_HeavyRain_Cornering_ACC"
   ],
   "weather_presets_tested": [
     "ClearNoon",
     "CloudyNoon",
     "WetNoon",
     "SoftRainNoon",
-    "ClearSunset"
+    "ClearSunset",
+    "WetCloudyNoon",
+    "MidRainyNoon",
+    "WetSunset",
+    "ClearNight",
+    "HardRainNoon"
   ],
   "fsd_metrics": {
     "red_light_stops": 1,
-    "lane_changes_completed": 2,
-    "pedestrian_aeb_stops": 1,
-    "acc_follow_episodes": 1,
+    "lane_changes_completed": 4,
+    "pedestrian_aeb_stops": 2,
+    "acc_follow_episodes": 3,
+    "stop_and_go_recoveries": 1,
+    "blindspot_interlocks": 1,
+    "night_rain_episodes": 3,
     "red_light_infractions": 0,
     "pedestrian_collisions": 0,
     "vehicle_collisions": 0,
     "off_road_infractions": 0
   },
   "shield_interventions": {
-    "rule1_emergency_brake": 26,
-    "boundary_left_unavailable": 76,
-    "boundary_right_unavailable": 79
+    "rule1_emergency_brake": 49,
+    "boundary_left_unavailable": 152,
+    "boundary_right_unavailable": 158,
+    "blindspot_left_occupied": 5
   },
   "targets_met": {
     "latency_le_40ms": true,
     "route_completion_ge_85pct": true,
     "crash_free_ge_95pct": true,
     "ece_le_0_05": true
+  },
+  "ablation_mode": "full",
+  "seed_range": [
+    5000,
+    5009
+  ],
+  "total_distance_driven_m": 680.0,
+  "p50_latency_ms": 33.62,
+  "p99_latency_ms": 36.85,
+  "stage_latency_breakdown_ms": {
+    "preprocess_crop_resize": 0.42,
+    "dinov2_vit_b14_frozen": 16.92,
+    "spatial_projector_temporal_aux": 1.35,
+    "laya_modernbert_e2e_traj": 14.7,
+    "safety_shield_bicycle_mpc_pid": 0.45
+  },
+  "scenario_composite_driving_score_pct": 100.0,
+  "mean_cross_track_error_m": 0.084,
+  "rms_steer_delta": 0.0118,
+  "mean_speed_tracking_error_kmh": 2.41,
+  "uncalibrated_val_ece": {
+    "maneuver_ece": 0.0009,
+    "speed_ece": 0.0022,
+    "aeb_ece": 0.0148,
+    "mean_ece": 0.006,
+    "num_bins": 15
   }
 }

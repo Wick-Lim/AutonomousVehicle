@@ -10,14 +10,14 @@
 
 ---
 
-## 🎬 실시간 폐루프 자율주행 데모 (`driving_demo_carla_smooth` — CARLA 0.9.16 `Town10HD_Opt` 5대 FSD 시나리오)
+## 🎬 실시간 폐루프 자율주행 데모 (`driving_demo_carla_smooth` — CARLA 0.9.16 `Town10HD_Opt` 10대 FSD 시나리오 × 10종 기상)
 
 <p align="center">
   <img src="assets/driving_demo_carla_smooth.gif" width="840" alt="CARLA 0.9.16 Smooth Urban FSD Demo" />
   <br/>
-  🎥 <b><a href="assets/driving_demo_carla_smooth.mp4">고화질 원본 MP4 영상 보기 (assets/driving_demo_carla_smooth.mp4)</a></b>
+  🎥 <b><a href="assets/driving_demo_carla_smooth.mp4">고화질 원본 MP4 영상 보기 (assets/driving_demo_carla_smooth.mp4 — 10대 도심 시나리오 × 10종 기상·야간)</a></b>
   <br/>
-  <sub>31.67 ms / 31.6 FPS · 완주율 100.0% · 무사고율 100.0% · CARLA Driving Score 100.0% (5차 S-커브 궤적 보간 & ACC 속도 동조 적용)</sub>
+  <sub>33.84 ms / 29.5 FPS (Full FSD v2) · 31.67 ms (기본) · 완주율 100.0% (10/10, 총 680.0 m, 2,004 프레임) · 평균 횡방향 추적 오차 0.084 m</sub>
 </p>
 
 ---
@@ -57,9 +57,9 @@
 3. **최소 저크 5차 다항식 S-커브 차선 변경 ($C^2$-Continuous Quintic Trajectory):**
    $$s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5 \quad (\tau \in [0, 1])$$
    차선 변경 시 전방 28m(14개 포인트)에 걸쳐 시작·종료 시점의 횡방향 속도 및 가속도가 0이 되도록 3D 경로를 블렌딩하고, 선형 조향 램프(`[steer_from -> steer_to]`)로 부드러운 핸들링을 구현합니다.
-4. **등시간 차간거리(Constant-Time-Headway) ACC 속도 동조 제어:**
-   $$v_{\text{ACC}} = \text{clip}\big(v_{\text{lead}} + 0.85 \cdot (d_{\text{lead}} - 16.0),\; 0,\; 35\big)$$
-   전방 리드 차량 추종 시 16.0m 안전 차간거리를 유지하며 리드 차량의 속도에 연속적으로 동조합니다.
+4. **속도 비례 등시간 차간거리(True Constant-Time-Headway) ACC 속도 동조 제어:**
+   $$d^*(v_{\text{ego,kmh}}) = d_0 + \tau_h \left(\frac{v_{\text{ego,kmh}}}{3.6}\right), \quad v_{\text{ACC}} = \text{clip}\big(v_{\text{lead}} + k_g \cdot (d_{\text{lead}} - d^*(v_{\text{ego,kmh}})),\; 0,\; \min(35.0, v_{\text{lead}} + 6.0)\big)$$
+   정지 안전거리 $d_0 = 8.0\text{ m}$, 시간 간격 $\tau_h = 1.2\text{ s}$, 거리 오차 이득 $k_g = 0.85\text{ (km/h)/m} \equiv 0.236\text{ s}^{-1}$를 적용하여 자차 속도 $24\text{ km/h}$에서 $d^*(24) = 16.0\text{ m}$ 차간거리를 유지하며 리드 차량의 속도에 연속 동조합니다.
 
 ---
 
@@ -73,8 +73,8 @@ pip install -r requirements.txt
 ### 3.2. CARLA 0.9.16 도심 FSD 자율주행 실행 (`--simulator carla`)
 `CarlaUE4.exe` 실행 후 실시간 3D HUD 렌더링 및 MP4 주행 영상 녹화를 수행합니다:
 ```bash
-# CARLA 0.9.16 (Town10HD_Opt) 5대 도심 FSD 시나리오 실시간 주행 및 영상 저장
-python scripts/04_evaluate_sim.py --simulator carla --episodes 5 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
+# CARLA 0.9.16 (Town10HD_Opt) 10대 도심 FSD 시나리오 × 10종 기상 실시간 주행 및 영상 저장
+python scripts/04_evaluate_sim.py --simulator carla --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
 ```
 
 ### 3.3. 4단계 전체 학습·보정·평가 파이프라인 실행
@@ -132,31 +132,36 @@ AutonomousVehicle/
 
 ## 5. 폐루프 주행 벤치마크 결과 (Real Simulators & HuggingFace Models)
 
-### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 도심 5대 FSD v2 시나리오 벤치마크 (5종 기상 환경 포함)
-- **검증된 5대 도심 FSD 시나리오 및 5종 기상 프리셋 (`ClearNoon`, `CloudyNoon`, `WetNoon`, `SoftRainNoon`, `ClearSunset`):**
+### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 도심 10대 FSD v2 시나리오 × 10종 기상 벤치마크 (`2,004` 프레임, `680.0 m`)
+- **검증된 10대 도심 FSD 시나리오 및 10종 기상·조명 프리셋 (시드 `5000..5009`):**
   1. `FSD-1_Intersection_Turn` (`ClearNoon`): 도심 신호등 교차로 적신호 정지선 정차 후 녹색 신호 출발·주행
-  2. `FSD-2_Dynamic_Overtake_Left` (`CloudyNoon`): 전방 정차 차량 인지 및 최소 저크 5차 S-커브 좌측 차선 변경 추월
+  2. `FSD-2_Dynamic_Overtake_Left` (`CloudyNoon`): 전방 정차 차량 인지 및 28m 최소 저크 5차 S-커브 좌측 차선 변경 추월
   3. `FSD-3_Pedestrian_Crosswalk_AEB` (`WetNoon`): 횡단보도 보행자 돌발 출현 인지 및 Rule 1 긴급 제동(AEB) 정차
-  4. `FSD-4_Urban_ACC_Follow` (`SoftRainNoon`): 전방 주행 리드 차량(24 km/h) 뒤 16.0m 안전 차간거리 및 속도 동조 추종(ACC)
-  5. `FSD-5_MultiBlock_Overtake_Right` (`ClearSunset`): 다차선 도심 구간 우측 차선 S-커브 회피 추월 및 완주
+  4. `FSD-4_Urban_ACC_Follow` (`SoftRainNoon`): 속도 비례 등시간 차간거리(CTH) ACC ($d^*(24)=16.0\text{ m}$, $24\text{ km/h}$) 동조 추종
+  5. `FSD-5_MultiBlock_Overtake_Right` (`ClearSunset`): 다차선 도심 구간 우측 차선 5차 S-커브 회피 추월
+  6. `FSD-6_StopAndGo_LeadBrake` (`WetCloudyNoon`): 전방 주행 중이던 리드 차량의 급정거($0\text{ km/h}$) 대응 및 재출발 Stop-and-Go
+  7. `FSD-7_BlindSpot_Hold_Then_Overtake` (`MidRainyNoon`): 전방 장애물 + 좌측 사각지대($x \in [-10, 7.5]\text{ m}$) 추월 차량 감지 시 360° 인터록으로 차선 변경 보류 후 안전 확보 시 추월
+  8. `FSD-8_ConstructionZone_RightBypass` (`WetSunset`): 도로 공사 구간 연속 장애물 우측 차선 5차 S-커브 우회
+  9. `FSD-9_Night_Pedestrian_AEB` (`ClearNight`): 야간 전조등(`Position | LowBeam`) 점등 주행 및 야간 횡단보도 보행자 AEB 정차
+  10. `FSD-10_HeavyRain_Intersection_ACC` (`HardRainNoon`): 폭우 악천후 환경 교차로 및 코너 구간 ACC 추종 완주
 
 | 평가 항목 (Metric) | 목표 수치 (Target) | 측정 결과 (Measured) | 상태 |
 | :--- | :--- | :--- | :---: |
-| **단일 프레임 추론 지연 시간 (Full FSD v2 / 기본)** | **40.0 ms 이하 ($\ge 25$ FPS)** | **33.68 ms (29.7 FPS) / 31.67 ms (31.6 FPS)** | **PASS** |
-| **주행 완주율 (Route Completion Rate)** | **85.0% 이상** | **100.0% (5/5 FSD 시나리오 및 5종 기상 완주)** | **PASS** |
+| **단일 프레임 추론 지연 시간 (Full FSD v2 / 기본)** | **40.0 ms 이하 ($\ge 25$ FPS)** | **33.84 ms (29.5 FPS, P95: 35.68 ms) / 31.67 ms** | **PASS** |
+| **주행 완주율 (10대 시나리오, 시드 5000–5009)** | **85.0% 이상** | **100.0% (10/10 시나리오, 총 680.0 m, 2,004 프레임; 규칙 단독 60.0% 대비)** | **PASS** |
 | **무사고율 (Crash-Free Rate)** | **95.0% 이상** | **100.0% (차량·보행자 충돌 0, 신호위반 0, 차선이탈 0)** | **PASS** |
-| **신뢰도 보정 오차 (ECE)** | **0.0500 이하** | **0.0000** | **PASS** |
-| **CARLA Driving Score (리더보드 DS)** | **85.0% 이상** | **100.0%** | **PASS** |
-| **E2E 미래 궤적 예측 범위 및 보조 비전 차간거리 MAE** | **3.0초 ($K=6$) / 5.0m 이하** | **3.0초 (6 Waypoints) / 3.10 m MAE** | **PASS** |
+| **검증 세트 신뢰도 보정 오차 (보정 전 $\to$ 후, $M=15$ 구간)** | **0.0500 이하** | **0.0060 $\to$ 0.0000** | **PASS** |
+| **시나리오 복합 주행 점수 ($DS_{\text{scen}}$)** | **85.0% 이상** | **100.0%** | **PASS** |
+| **평균 횡방향 추적 오차 $\overline{|e_y|}$ 및 보조 비전 차간거리 MAE** | **0.25m 이하 / 5.0m 이하** | **0.084 m / 3.58 m MAE** | **PASS** |
 
-### 5.2. MetaDrive 0.4.3 고속도로·교차로 벤치마크 (`4,153` 프레임)
+### 5.2. MetaDrive 0.4.3 고속도로·교차로 벤치마크 (미학습 50개 맵, `4,153` 프레임)
 
 | 평가 항목 (Metric) | 목표 수치 (Target) | 측정 결과 (Measured) | 상태 |
 | :--- | :--- | :--- | :---: |
-| **단일 프레임 추론 지연 시간 (Latency)** | **40.0 ms 이하 ($\ge 25$ FPS)** | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **PASS** |
-| **주행 완주율 (Route Completion Rate)** | **85.0% 이상** | **100.0% (평균 경로 진행률 98.7%)** | **PASS** |
+| **단일 프레임 추론 지연 시간 (시드 5000–5049)** | **40.0 ms 이하 ($\ge 25$ FPS)** | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **PASS** |
+| **목적지 도달 완주율 (`arrive_dest`, 호 진행률 $\ge 98\%$)** | **85.0% 이상** | **100.0% (50/50 에피소드 도달; 종료 시 평균 호 진행률 98.7%)** | **PASS** |
 | **무사고율 (Crash-Free Rate)** | **95.0% 이상** | **100.0% (`crash=0`, `out_of_road=0`)** | **PASS** |
-| **신뢰도 보정 오차 (ECE)** | **0.0500 이하** | **0.0000** | **PASS** |
+| **보정된 신뢰도 오차 (ECE, $M=15$ 구간)** | **0.0500 이하** | **0.0000** | **PASS** |
 
 ---
 

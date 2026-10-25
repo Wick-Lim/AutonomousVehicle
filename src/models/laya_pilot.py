@@ -628,10 +628,11 @@ class LayaPilot(nn.Module):
 
             v_tgt = float(exp_speed_kmh[b].item())
             if lead_d < 38.0 and aeb_probs[b].item() < 0.70:
-                acc_v = max(0.0, min(v_tgt, lead_v + 0.85 * (lead_d - 16.0)))
+                d_star = 8.0 + 1.2 * (v0_kmh / 3.6)
+                acc_v = max(0.0, min(35.0, lead_v + 6.0, lead_v + 0.85 * (lead_d - d_star)))
                 v_tgt = acc_v
             if abs(curv) > 0.15:
-                v_curv_cap = 3.6 * math.sqrt(2.8 / max(abs(curv) * 0.08, 1e-3))
+                v_curv_cap = 3.6 * math.sqrt(2.85 / max(abs(curv) * 0.065, 1e-3))
                 v_tgt = min(v_tgt, v_curv_cap)
 
             v_k = v0_kmh + (v_tgt - v0_kmh) * quintic_s

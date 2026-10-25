@@ -30,6 +30,11 @@ FSD_SCENARIO_NAMES: Tuple[str, ...] = (
     "FSD-3_Pedestrian_Crosswalk_AEB",
     "FSD-4_Urban_ACC_Follow",
     "FSD-5_MultiBlock_Overtake_Right",
+    "FSD-6_StopAndGo_Lead_Braking",
+    "FSD-7_BlindSpot_Blocked_Overtake",
+    "FSD-8_Construction_Zone_Bypass_Right",
+    "FSD-9_Night_Headlight_Pedestrian_AEB",
+    "FSD-10_HeavyRain_Cornering_ACC",
 )
 
 FSD_WEATHER_PRESETS: Tuple[str, ...] = (
@@ -38,6 +43,11 @@ FSD_WEATHER_PRESETS: Tuple[str, ...] = (
     "WetNoon",
     "SoftRainNoon",
     "ClearSunset",
+    "WetCloudyNoon",
+    "MidRainyNoon",
+    "WetSunset",
+    "ClearNight",
+    "HardRainNoon",
 )
 
 
@@ -113,6 +123,9 @@ class CarlaWrapper:
             "lane_changes_completed": 0,
             "pedestrian_aeb_stops": 0,
             "acc_follow_episodes": 0,
+            "stop_and_go_recoveries": 0,
+            "blindspot_interlocks": 0,
+            "night_rain_episodes": 0,
             "red_light_infractions": 0,
             "pedestrian_collisions": 0,
             "vehicle_collisions": 0,
@@ -506,9 +519,14 @@ class CarlaWrapper:
         return best_i, proj_x, proj_y, proj_yaw, look_x, look_y, ref_yaw
 
     def _step_fsd4_lead_vehicle(self) -> None:
-        """Actively drive the FSD-4 ACC lead vehicle smoothly along the route at 24.0 km/h."""
+        """Actively drive the ACC/Stop-and-Go lead vehicle along the route (FSD-4, FSD-6, FSD-10)."""
         if (
-            self._fsd_scenario_name != "FSD-4_Urban_ACC_Follow"
+            self._fsd_scenario_name
+            not in (
+                "FSD-4_Urban_ACC_Follow",
+                "FSD-6_StopAndGo_Lead_Braking",
+                "FSD-10_HeavyRain_Cornering_ACC",
+            )
             or self._scenario_actor is None
             or self._carla_mod is None
         ):
@@ -539,9 +557,21 @@ class CarlaWrapper:
             )
             lead_steer = float(np.clip(yaw_err * 0.90, -0.45, 0.45))
 
-            target_lead_kmh = 24.0
+            # In FSD-6, lead vehicle performs an abrupt mid-block stop, then re-accelerates
+            if (
+                self._fsd_scenario_name == "FSD-6_StopAndGo_Lead_Braking"
+                and not self._fsd_event_resolved
+                and 14.0 <= self._progress <= 24.0
+            ):
+                target_lead_kmh = 0.0
+            else:
+                target_lead_kmh = 24.0
+
             speed_err = target_lead_kmh - lead_speed_kmh
-            if speed_err >= -0.8:
+            if target_lead_kmh <= 0.5:
+                lead_throttle = 0.0
+                lead_brake = 1.0
+            elif speed_err >= -0.8:
                 lead_throttle = float(np.clip(0.44 + 0.05 * speed_err, 0.18, 0.68))
                 lead_brake = 0.0
             else:
@@ -577,10 +607,19 @@ class CarlaWrapper:
         scenario_idx = int(abs(seed - 5000)) % len(FSD_SCENARIO_NAMES)
         self._fsd_scenario_name = FSD_SCENARIO_NAMES[scenario_idx]
         self._weather_preset = FSD_WEATHER_PRESETS[scenario_idx % len(FSD_WEATHER_PRESETS)]
+        if self._weather_preset in ("ClearNight", "HardRainNoon", "MidRainyNoon"):
+            self._fsd_metrics["night_rain_episodes"] += 1
         try:
             weather_param = getattr(carla.WeatherParameters, self._weather_preset, None)
             if weather_param is not None:
                 self._world.set_weather(weather_param)
+            elif self._weather_preset == "ClearNight":
+                w_night = carla.WeatherParameters(
+                    cloudiness=10.0,
+                    precipitation=0.0,
+                    sun_altitude_angle=-30.0,
+                )
+                self._world.set_weather(w_night)
         except Exception:
             pass
 
@@ -621,6 +660,11 @@ class CarlaWrapper:
             "FSD-3_Pedestrian_Crosswalk_AEB": [5, 8, 22, 6, 19, 4],
             "FSD-4_Urban_ACC_Follow": [7, 10, 4, 9, 20, 23],
             "FSD-5_MultiBlock_Overtake_Right": [6, 19, 22, 5, 8, 3],
+            "FSD-6_StopAndGo_Lead_Braking": [7, 10, 4, 9, 20, 23],
+            "FSD-7_BlindSpot_Blocked_Overtake": [4, 7, 9, 10, 20, 23, 1],
+            "FSD-8_Construction_Zone_Bypass_Right": [6, 19, 22, 5, 8, 3],
+            "FSD-9_Night_Headlight_Pedestrian_AEB": [5, 8, 22, 6, 19, 4],
+            "FSD-10_HeavyRain_Cornering_ACC": [7, 10, 4, 9, 20, 23],
         }
         pref_indices = scenario_sp_map.get(self._fsd_scenario_name, [1, 4, 5, 7, 6])
         ordered_sps = [all_sps[i] for i in pref_indices if i < len(all_sps)] + all_sps
@@ -631,7 +675,10 @@ class CarlaWrapper:
             )
             if start_wp is None:
                 continue
-            if self._fsd_scenario_name == "FSD-2_Dynamic_Overtake_Left":
+            if self._fsd_scenario_name in (
+                "FSD-2_Dynamic_Overtake_Left",
+                "FSD-7_BlindSpot_Blocked_Overtake",
+            ):
                 l_wp = start_wp.get_left_lane()
                 if not (
                     l_wp is not None
@@ -639,7 +686,10 @@ class CarlaWrapper:
                     and l_wp.lane_id * start_wp.lane_id > 0
                 ):
                     continue
-            elif self._fsd_scenario_name == "FSD-5_MultiBlock_Overtake_Right":
+            elif self._fsd_scenario_name in (
+                "FSD-5_MultiBlock_Overtake_Right",
+                "FSD-8_Construction_Zone_Bypass_Right",
+            ):
                 r_wp = start_wp.get_right_lane()
                 if not (
                     r_wp is not None
@@ -681,11 +731,31 @@ class CarlaWrapper:
         if self._ego_vehicle is None:
             raise RuntimeError("Failed to spawn CARLA ego vehicle.")
 
+        # Turn on ego vehicle headlights during night, sunset, or rain scenarios
+        try:
+            if hasattr(carla, "VehicleLightState"):
+                light_mask = (
+                    carla.VehicleLightState.Position
+                    | carla.VehicleLightState.LowBeam
+                )
+                if "Night" in self._weather_preset or "Rain" in self._weather_preset:
+                    light_mask |= carla.VehicleLightState.HighBeam
+                self._ego_vehicle.set_light_state(
+                    carla.VehicleLightState(light_mask)
+                )
+        except Exception:
+            pass
+
         # Spawn Scenario-Specific Dynamic Actor (Stalled Car, Jaywalking Pedestrian, or ACC Lead Car)
         vehicle_bps = four_wheel_bps if len(four_wheel_bps) > 0 else list(bp_lib.filter("vehicle.*"))
         if (
             self._fsd_scenario_name
-            in ("FSD-2_Dynamic_Overtake_Left", "FSD-5_MultiBlock_Overtake_Right")
+            in (
+                "FSD-2_Dynamic_Overtake_Left",
+                "FSD-5_MultiBlock_Overtake_Right",
+                "FSD-7_BlindSpot_Blocked_Overtake",
+                "FSD-8_Construction_Zone_Bypass_Right",
+            )
             and len(self._route_waypoints) > 20
         ):
             obs_wp = self._route_waypoints[18]  # ~36m ahead in ego's initial lane
@@ -704,7 +774,8 @@ class CarlaWrapper:
                     carla.VehicleControl(throttle=0.0, brake=1.0, hand_brake=True)
                 )
         elif (
-            self._fsd_scenario_name == "FSD-3_Pedestrian_Crosswalk_AEB"
+            self._fsd_scenario_name
+            in ("FSD-3_Pedestrian_Crosswalk_AEB", "FSD-9_Night_Headlight_Pedestrian_AEB")
             and len(self._route_waypoints) > 15
         ):
             ped_wp = self._route_waypoints[13]  # ~26m ahead on crosswalk
@@ -720,7 +791,12 @@ class CarlaWrapper:
             if walker_bps:
                 self._scenario_actor = self._world.try_spawn_actor(walker_bps[0], ped_tf)
         elif (
-            self._fsd_scenario_name == "FSD-4_Urban_ACC_Follow"
+            self._fsd_scenario_name
+            in (
+                "FSD-4_Urban_ACC_Follow",
+                "FSD-6_StopAndGo_Lead_Braking",
+                "FSD-10_HeavyRain_Cornering_ACC",
+            )
             and len(self._route_waypoints) > 14
         ):
             lead_wp = self._route_waypoints[8]  # ~16m ahead in same lane for steady ACC tracking
@@ -958,8 +1034,11 @@ class CarlaWrapper:
                         f"PEDESTRIAN {d_act:.1f}m [AEB]"
                         if "Pedestrian" in self._fsd_scenario_name
                         else (
-                            f"STALLED CAR {d_act:.1f}m [{exp_man.upper()}]"
-                            if "Overtake" in self._fsd_scenario_name
+                            f"OBSTACLE {d_act:.1f}m [{exp_man.upper()}]"
+                            if (
+                                "Overtake" in self._fsd_scenario_name
+                                or "Bypass" in self._fsd_scenario_name
+                            )
                             else f"LEAD {d_act:.1f}m | {a_kmh:.0f}km/h [ACC]"
                         )
                     )
@@ -1139,6 +1218,8 @@ class CarlaWrapper:
         is_overtake_scenario = self._fsd_scenario_name in (
             "FSD-2_Dynamic_Overtake_Left",
             "FSD-5_MultiBlock_Overtake_Right",
+            "FSD-7_BlindSpot_Blocked_Overtake",
+            "FSD-8_Construction_Zone_Bypass_Right",
         )
 
         for actor in self._world.get_actors():
@@ -1180,9 +1261,14 @@ class CarlaWrapper:
         self._blind_spot_left = blind_spot_left
         self._blind_spot_right = blind_spot_right
 
-        # Continuous ACC radar lock onto FSD-4 lead vehicle (never drops out on gentle curves)
+        # Continuous ACC radar lock onto lead vehicle (FSD-4, FSD-6, FSD-10)
         if (
-            self._fsd_scenario_name == "FSD-4_Urban_ACC_Follow"
+            self._fsd_scenario_name
+            in (
+                "FSD-4_Urban_ACC_Follow",
+                "FSD-6_StopAndGo_Lead_Braking",
+                "FSD-10_HeavyRain_Cornering_ACC",
+            )
             and self._scenario_actor is not None
         ):
             try:
@@ -1204,7 +1290,12 @@ class CarlaWrapper:
                 tl_state = tl.get_state()
                 if tl_state == carla.TrafficLightState.Red:
                     if (
-                        self._fsd_scenario_name == "FSD-4_Urban_ACC_Follow"
+                        self._fsd_scenario_name
+                        in (
+                            "FSD-4_Urban_ACC_Follow",
+                            "FSD-6_StopAndGo_Lead_Braking",
+                            "FSD-10_HeavyRain_Cornering_ACC",
+                        )
                         or self._fsd_stop_hold_steps >= 10
                     ):
                         try:
@@ -1226,7 +1317,7 @@ class CarlaWrapper:
             nav_command = "turn_left" if road_curvature > 0 else "turn_right"
         exp_man = "follow_lead" if lead_distance_m <= 32.0 else "keep_lane"
 
-        # Execute FSD Scenario-Specific State Machine (FSD-1 through FSD-5)
+        # Execute FSD Scenario-Specific State Machine (FSD-1 through FSD-10)
         if self._fsd_scenario_name == "FSD-1_Intersection_Turn" and not self._fsd_event_resolved:
             if 14.0 <= self._progress <= 25.0:
                 if speed_kmh < 2.5 or self._fsd_stop_hold_steps >= 10:
@@ -1239,6 +1330,22 @@ class CarlaWrapper:
                     traffic_light = "red"
                     hazard_source = "red_light"
                     lead_distance_m = 8.0
+                    lead_speed_kmh = 0.0
+                    self._fsd_stop_hold_steps += 1
+        elif (
+            self._fsd_scenario_name == "FSD-6_StopAndGo_Lead_Braking"
+            and not self._fsd_event_resolved
+        ):
+            if 14.0 <= self._progress <= 24.0:
+                if speed_kmh < 3.5 or self._fsd_stop_hold_steps >= 9:
+                    self._fsd_event_resolved = True
+                    self._fsd_metrics["stop_and_go_recoveries"] += 1
+                    hazard_source = "vehicle"
+                    lead_distance_m = max(14.5, lead_distance_m)
+                    lead_speed_kmh = 24.0
+                else:
+                    hazard_source = "vehicle"
+                    lead_distance_m = min(lead_distance_m, 9.5)
                     lead_speed_kmh = 0.0
                     self._fsd_stop_hold_steps += 1
         elif (
@@ -1258,7 +1365,37 @@ class CarlaWrapper:
                 if self._fsd_lane_changed and self._route_wp_idx >= self._lane_change_end_idx:
                     self._fsd_event_resolved = True
         elif (
-            self._fsd_scenario_name == "FSD-5_MultiBlock_Overtake_Right"
+            self._fsd_scenario_name == "FSD-7_BlindSpot_Blocked_Overtake"
+            and self._scenario_actor is not None
+            and not self._fsd_event_resolved
+        ):
+            obs_loc = self._scenario_actor.get_location()
+            d_obs = math.hypot(float(obs_loc.x - loc.x), float(obs_loc.y - loc.y))
+            if d_obs <= 35.5:
+                exp_man = "change_left"
+                nav_command = "turn_left"
+                lead_distance_m = 26.0
+                lead_speed_kmh = 26.0
+                if self._fsd_stop_hold_steps < 5 and not self._fsd_lane_changed:
+                    # Simulate adjacent vehicle occupying left blind-spot zone for 5 frames before clearing
+                    blind_spot_left = True
+                    self._blind_spot_left = True
+                    self._fsd_stop_hold_steps += 1
+                    if self._fsd_stop_hold_steps == 1:
+                        self._fsd_metrics["blindspot_interlocks"] += 1
+                else:
+                    blind_spot_left = False
+                    self._blind_spot_left = False
+                    if not self._fsd_lane_changed:
+                        self._switch_route_to_adjacent_lane("left")
+                    if self._fsd_lane_changed and self._route_wp_idx >= self._lane_change_end_idx:
+                        self._fsd_event_resolved = True
+        elif (
+            self._fsd_scenario_name
+            in (
+                "FSD-5_MultiBlock_Overtake_Right",
+                "FSD-8_Construction_Zone_Bypass_Right",
+            )
             and self._scenario_actor is not None
             and not self._fsd_event_resolved
         ):
@@ -1269,12 +1406,15 @@ class CarlaWrapper:
                 nav_command = "turn_right"
                 lead_distance_m = 26.0
                 lead_speed_kmh = 26.0
+                if self._fsd_scenario_name == "FSD-8_Construction_Zone_Bypass_Right":
+                    traffic_light = "yellow"
                 if not self._fsd_lane_changed:
                     self._switch_route_to_adjacent_lane("right")
                 if self._fsd_lane_changed and self._route_wp_idx >= self._lane_change_end_idx:
                     self._fsd_event_resolved = True
         elif (
-            self._fsd_scenario_name == "FSD-3_Pedestrian_Crosswalk_AEB"
+            self._fsd_scenario_name
+            in ("FSD-3_Pedestrian_Crosswalk_AEB", "FSD-9_Night_Headlight_Pedestrian_AEB")
             and self._scenario_actor is not None
             and not self._fsd_event_resolved
         ):

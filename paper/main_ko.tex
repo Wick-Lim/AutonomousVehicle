@@ -8,7 +8,7 @@
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{hyperref}
-\usepackage[margin=0.78in]{geometry}
+\usepackage[margin=0.72in]{geometry}
 \usepackage{caption}
 
 \hypersetup{
@@ -34,108 +34,74 @@
 \maketitle
 
 \begin{abstract}
-20\,Hz 주기로 돌아가는 실시간 차량 제어 루프 안에 일반적인 자기회귀(Autoregressive) 비전-언어 모델을 그대로 넣으면 첫 문장을 디코딩하기도 전에 차가 차선을 벗어나거나 앞차와 추돌한다. 시속 35\,km로 달리는 차량은 50\,ms 틱마다 약 0.5\,m씩 전진하는 반면, 토큰 15개를 순차 생성하는 데는 단일 GPU에서도 300--1,000\,ms가 걸리기 때문이다. 본 논문은 토큰을 하나씩 생성하는 대신 단 한 번의 양방향 Forward Pass로 주행 판단을 끝내 프레임당 31.67\,ms(31.6\,FPS)에 동작하는 폐루프 자율주행 시스템을 다룬다. 상하 불필요 영역을 잘라낸 196$\times$392 와이드 카메라 영상에서 동결된 DINOv2(ViT-B/14)로 14$\times$28 패치 특징을 뽑고, 이를 4$\times$9 공간 격자(36개 토큰)로 압축해 동결된 ModernBERT 기반 Laya 모델(\texttt{convaiinnovations/laya})의 임베딩 층에 직접 주입한다. 전체 네트워크 중 학습되는 가중치는 1.85M 크기의 2D 프로젝터뿐이다. 또한 상위 판단이 이산적이라 하위 제어기에서 핸들이 튀거나 앞차 추종 시 속도가 출렁이는 문제를 막기 위해, 사후 온도 보정(Temperature Scaling) 안전 실드, 28\,m 구간의 5차 다항식 S-커브 차선 변경 궤적, 횡방향 오차와 분리된 현(Chord) 각도 추종, 등시간 차간거리 ACC 제어기를 함께 설계했다. MetaDrive 0.4.3의 4,153 프레임과 CARLA 0.9.16(\texttt{Town10HD\_Opt}) 도심 5대 시나리오에서 실험한 결과, 충돌 없이 전 구간 100\% 완주율과 보정 오차(ECE) 0.0000을 기록했다.
+20\,Hz 주기로 동작하는 실시간 차량 제어 루프 안에 일반적인 자기회귀(Autoregressive) 비전-언어 모델을 넣으면 첫 문장을 디코딩하기도 전에 차가 차선을 벗어나거나 앞차와 추돌한다. 시속 35\,km로 달리는 차량은 50\,ms 틱마다 약 0.5\,m씩 전진하는 반면, 토큰 15개를 순차 생성하는 데는 300--1,000\,ms가 소요되기 때문이다. 본 논문은 토큰을 순차 생성하는 대신 단 한 번의 양방향 Forward Pass로 주행 판단과 3.0초 미래 궤적(6-웨이포인트) 예측을 동시에 끝내 기본 31.67\,ms(전체 보조 인지·궤적 헤드 포함 시 33.84\,ms, 29.5\,FPS)에 동작하는 폐루프 자율주행 시스템을 제시한다. 상하 불필요 영역을 잘라낸 196$\times$392 와이드 카메라 영상에서 동결된 DINOv2(ViT-B/14)로 14$\times$28 패치 특징을 추출하고, 이를 4$\times$9 공간 격자(36개 토큰)와 시공간 잔차($\Delta V_t$)로 결합해 동결된 ModernBERT 기반 Laya 모델(\texttt{convaiinnovations/laya})에 주입한다. 하위 제어 단계에서는 사후 온도 보정 안전 실드, 360$^\circ$ 사각지대 인터록, 28\,m 구간의 5차 다항식 S-커브 차선 변경 궤적, 현(Chord) 각도 추종 및 운동학적 자전거 모델 예측 제어(MPC), 그리고 속도 비례 등시간 차간거리(CTH) ACC 제어기($d^*(v_{\text{ego}}) = 8.0 + 1.2 v_{\text{ego}}$, $k_g = 0.85$\,(km/h)/m)를 결합했다. MetaDrive 0.4.3의 미학습 50개 맵(4,153 프레임)과 CARLA 0.9.16(\texttt{Town10HD\_Opt}) 10대 도심 시나리오$\times$10종 기상 환경(2,004 프레임, 총 680\,m)에서 평가한 결과, 규칙 단독 기준선(완주율 60.0\%) 대비 100.0\% 완주율과 횡방향 추적 오차 0.084\,m를 달성했다.
 \end{abstract}
 
-\section{서론}
-카메라 영상과 내비게이션 상태 텍스트를 함께 처리하는 멀티모달 모델은 자율주행 제어에 직관적인 인터페이스를 제공한다 \cite{brohan2023rt2}. 하지만 자기회귀 디코더는 출력 시퀀스 $y_{1:K}$를 얻기 위해
-\begin{equation}
-    P(y_{1:K} \mid I, \mathcal{T}) = \prod_{k=1}^{K} P(y_k \mid y_{<k}, I, \mathcal{T})
-\end{equation}
-를 매 토큰마다 직렬로 계산해야 한다. 짧은 JSON 문자열(12--16 토큰)만 출력해도 트랜스포머를 열두 번 이상 반복 호출해야 하므로 지연 시간이 350\,ms를 훌쩍 넘긴다. CARLA 도심 맵에서 전방 16\,m 횡단보도에 보행자가 나타났을 때 350\,ms 동안 브레이크를 밟지 못하면 제동 가능 거리의 3분의 1을 그냥 날리게 된다.
-
-우리가 던진 질문은 단순하다. 20\,Hz 제어 루프에서 차선 유지·변경 여부와 목표 속도를 정하는 데 굳이 문장을 한 글자씩 생성할 필요가 있는가? 실제 주행에 필요한 출력은 정해진 선택지 몇 개다. 차선을 유지할지, 앞차를 따라갈지, 좌/우로 차선을 바꿀지(\texttt{choice}), 어느 속도 단계를 목표로 할지(\texttt{score}), 급제동을 걸지(\texttt{noul})만 알면 된다. 입력 시퀀스 끝에 전용 쿼리 마커 토큰 세 개를 붙이고 양방향 인코더인 Laya \cite{laya2024nonautoregressive}를 한 번만 통과시키면 세 가지 답을 30\,ms 안에 동시에 읽을 수 있다.
-
-이를 실제 시뮬레이터 폐루프에 연결하는 과정에서는 오프라인 데이터셋 평가에서는 잘 드러나지 않는 두 가지 실제적인 문제를 해결해야 했다:
-\begin{enumerate}
-    \item \emph{시각 토큰을 너무 강하게 압축하면 좌우 차선 기하 정보가 사라진다.} 196$\times$392 이미지를 DINOv2 ViT-B/14 \cite{oquab2024dinov2}에 넣으면 $14 \times 28 = 392$개의 패치 벡터가 나온다. 392개를 전부 언어 모델에 넣으면 40\,ms 제한을 넘기고, 반대로 전역 평균 풀링으로 뭉개면 차선이 왼쪽에 있는지 오른쪽에 있는지 구분할 수 없다. 본 시스템은 가로 9칸, 세로 4칸의 적응형 평균 풀링(36개 토큰)과 2D 위치 임베딩을 사용해 토큰 수를 $10.8$배 줄이면서도 가로 방향 차선 분해능을 유지했다.
-    \item \emph{2\,m 간격의 이산 웨이포인트가 조향 떨림과 ACC 속도 헌팅(Hunting)을 유발한다.} 초기 CARLA 0.9.16 주행 테스트에서 정차된 장애물 차량을 피하려고 경로 체인을 옆 차선 웨이포인트로 바로 갈아끼웠더니, 기준선이 한 스텝 만에 옆으로 3.5\,m 점프하면서 핸들을 급격히 꺾었다가 반대쪽으로 출렁이는 오버슈트가 발생했다. 또한 시속 24\,km로 달리는 리드 차량 뒤를 따라갈 때 이산 속도 단계(20\,km/h vs.\ 35\,km/h) 사이를 오가며 가속과 급제동을 반복하는 현상이 나타났다.
-\end{enumerate}
+\section{서론 및 문제 정의}
+자기회귀 디코더는 출력 시퀀스 $y_{1:K}$를 얻기 위해 $P(y_{1:K} \mid I_t, \mathcal{T}_t) = \prod_{k=1}^{K} P(y_k \mid y_{<k}, I_t, \mathcal{T}_t)$를 매 토큰마다 직렬 계산하므로 300\,ms 이상의 지연이 발생한다 \cite{brohan2023rt2}. 반면 본 시스템은 단일 양방향 패스 \cite{laya2024nonautoregressive}에서 세 가지 이산 주행 결정과 3.0초 미래 6-웨이포인트 궤적 $\hat{\tau}_t = \{(\hat{x}_k, \hat{y}_k, \hat{v}_k)\}_{k=1}^{6}$를 동시에 산출한다:
+\begin{align}
+    m_t &\in \{\texttt{keep\_lane}, \texttt{change\_left}, \nonumber\\
+        &\quad\; \texttt{change\_right}, \texttt{follow\_lead}\}, \\
+    s_t &\in \{0, 1, 2, 3\} \mapsto \{0, 20, 35, 50\}\,\text{km/h}, \quad p_{\text{AEB}} \in [0, 1].
+\end{align}
 
 \begin{figure*}[t]
     \centering
-    \includegraphics[width=0.98\textwidth]{figures/fig1_carla_fsd_scenarios.png}
-    \caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}) 동기 모드(20\,Hz) 실시간 주행 화면 (3D AR 주행 카펫, 좌측 상단 BEV 레이더, 우측 상단 DINOv2 입력 크롭): (a) \texttt{FSD-1} 교차로 적신호 정지 후 출발, (b) \texttt{FSD-2} 정차 차량 회피를 위한 28\,m 5차 S-커브 좌측 추월, (c) \texttt{FSD-3} 횡단보도 보행자 AEB 급제동, (d) \texttt{FSD-4} 시속 24\,km 리드 차량 16\,m 간격 속도 동조 추종, (e) \texttt{FSD-5} 우측 차선 5차 S-커브 추월.}
+    \includegraphics[width=0.96\textwidth]{figures/fig1_carla_fsd_scenarios.png}
+    \caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}, 20\,Hz 동기 모드) 10대 도심 FSD 시나리오 및 10종 기상·조명 검증 화면 (\texttt{FSD-1}--\texttt{FSD-10}): 교차로 적신호 정지(\texttt{ClearNoon}), 28\,m 5차 S-커브 좌측 추월(\texttt{CloudyNoon}), 횡단보도 보행자 AEB(\texttt{WetNoon}), CTH-ACC 추종(\texttt{SoftRainNoon}), 우측 추월(\texttt{ClearSunset}), 리드 차량 급정거 Stop-and-Go(\texttt{WetCloudyNoon}), 360$^\circ$ 사각지대 대기 후 추월(\texttt{MidRainyNoon}), 공사 구간 우회(\texttt{WetSunset}), 야간 전조등 보행자 AEB(\texttt{ClearNight}), 폭우 코너링 ACC(\texttt{HardRainNoon}).}
     \label{fig:carla_scenarios_ko}
 \end{figure*}
 
-\section{비전-언어 단일 패스 아키텍처}
+\section{아키텍처, 다중 과업 학습 및 시공간 확장}
 
-\subsection{와이드 카메라 크롭 및 DINOv2 특징 추출}
-일반적인 정사각형 카메라 입력은 위쪽 하늘과 아래쪽 보닛에 픽셀을 낭비하면서 정작 교차로 좌우 차선은 잘라낸다. 우리는 원본 카메라 영상에서 상단 25\%(하늘)와 하단 10\%(보닛)를 잘라낸 뒤 $H=196, W=392$로 리사이즈한다.
+\subsection{4$\times$9 시공간 프로젝터 및 보조 비전 인지 헤드}
+원본 영상에서 상단 25\%(하늘)와 하단 10\%(보닛)를 잘라낸 $196 \times 392$ 영상을 동결된 \texttt{facebook/dinov2-base} \cite{oquab2024dinov2}에 통과시켜 $14 \times 28 = 392$개의 768차원 패치 특징 $F_{\text{patch}}$를 추출한다. \texttt{SpatialProjector} 모듈은 $(4, 9)$ 적응형 평균 풀링, 2D 행·열 위치 임베딩, 2층 GELU MLP($1,851,392$ 코어 파라미터), 그리고 이전 프레임 시각 토큰과의 게이팅된 시간 차분 잔차 $\Delta V_t = V_t - V_{t-1}$를 결합한다:
+\begin{align}
+    G_t &= \text{AdaptiveAvgPool2d}_{(4,9)}(\tilde{F}_t) \in \mathbb{R}^{B \times 768 \times 4 \times 9}, \\
+    V_t &= \text{MLP}\big(\text{Flatten}(G_t + E_{\text{row}} + E_{\text{col}})\big), \\
+    \tilde{V}_t &= V_t + \tanh(\alpha_{\text{temp}})\, W_{\text{temp}}\big(V_t - V_{t-1}\big).
+\end{align}
+또한 $\tilde{V}_t$의 $4 \times 9$ 격자를 영역별로 풀링하는 \texttt{AuxiliaryPerceptionHead}(상단 신호등 영역 행 $0..1$, 중앙 주행 코리더 열 $3..5$, 좌·우 주변 차선 열 $0..2, 6..8$)를 통해 전방 차간거리 $\hat{d}_{\text{lead}}$, 차선 오프셋 $\hat{e}_y$, 신호등 상태, 위험원 종류, 좌·우 사각지대 점유 확률을 동시에 추정한다.
 
-이 $3 \times 196 \times 392$ 텐서를 동결된 \texttt{facebook/dinov2-base} 모델 \cite{oquab2024dinov2}에 통과시키면 패치 크기 $14 \times 14$ 기준 $14 \times 28 = 392$개의 768차원 패치 임베딩 격자를 얻는다:
-\begin{equation}
-    F_{\text{patch}} = f_{\text{DINOv2}}(I_t) \in \mathbb{R}^{B \times 392 \times 768}.
-\end{equation}
-
-\subsection{4$\times$9 Spatial Projector}
-392개의 패치 토큰에서 가로 방향 차선 구조를 잃지 않고 토큰 수를 줄이기 위해, \texttt{SpatialProjector}는 $F_{\text{patch}}$를 2D 특징 맵 $\tilde{F} \in \mathbb{R}^{B \times 768 \times 14 \times 28}$로 되돌린 뒤 $(4, 9)$ 격자로 2D 적응형 평균 풀링을 적용한다:
-\begin{equation}
-    G = \text{AdaptiveAvgPool2d}_{(4,9)}(\tilde{F}) \in \mathbb{R}^{B \times 768 \times 4 \times 9}.
-\end{equation}
-세로 4칸은 근거리 범퍼 앞, 중거리 곡률, 원거리 장애물을 나누기에 충분하고, 가로 9칸은 좌측 차선·자차 차선 중앙·우측 차선의 경계를 세밀하게 구분해 준다.
-
-이후 $G$를 36개 토큰으로 펼치고 학습 가능한 2D 위치 임베딩 $E_{\text{pos}} \in \mathbb{R}^{1 \times 36 \times 768}$를 더한 뒤, 2층 MLP(GELU 및 LayerNorm 포함)로 Laya의 은닉 차원(1024)에 맞춘다:
-\begin{equation}
-    V_{\text{spatial}} = \text{MLP}\big(\text{Flatten}(G) + E_{\text{pos}}\big) \in \mathbb{R}^{B \times 36 \times 1024}.
-\end{equation}
-
-\subsection{Laya 단일 패스 리드아웃}
-시뮬레이터 래퍼는 매 스텝 현재 속도, 차선 중심 오차, 헤딩 각도 오차, 좌우 차선 유무, 내비게이션 명령, 신호등 상태, 위험 요인을 짧은 JSON 문자열로 묶어 토크나이징한 뒤 임베딩 $E_{\text{telemetry}}$를 추출한다. 여기에 세 개의 쿼리 마커 임베딩($e_{\text{choice}}, e_{\text{score}}, e_{\text{noul}}$)을 이어 붙여 \texttt{inputs\_embeds}로 한 번에 입력한다:
-\begin{equation}
-    Z = \big[ e_{\text{[CLS]}} \,;\, V_{\text{spatial}} \,;\, E_{\text{telemetry}} \,;\, e_{\text{choice}} \,;\, e_{\text{score}} \,;\, e_{\text{noul}} \big].
-\end{equation}
-단 한 번의 Forward Pass $H = f_{\text{Laya}}(Z)$ 결과에서 각 쿼리 위치의 벡터만 꺼내 선형 헤드에 통과시키면 기동 로짓 $z^{(m)} \in \mathbb{R}^4$, 목표 속도 로짓 $z^{(s)} \in \mathbb{R}^4$, 급제동 로짓 $z^{(b)} \in \mathbb{R}^2$가 동시에 계산된다.
+\subsection{학습 설정 및 온도 보정 프로토콜}
+1단계 학습(\texttt{02\_train\_projector.py})에서는 DINOv2와 Laya를 동결한 채 \texttt{ExpertLabeler}로 라벨링된 $50,000$ 프레임(학습 85\% / 검증 15\% 분리; 차선 변경 $3.0\times$, 급제동 $4.0\times$ 희소 클래스 오버샘플링)에서 다중 과업 손실 함수
+\begin{align}
+    \mathcal{L} &= 1.0\,\mathcal{L}_{\text{CE}}(z^{(m)}, y_m) + 1.0\,\mathcal{L}_{\text{CE}}(z^{(s)}, y_s) \nonumber\\
+                &\quad + 2.0\,\mathcal{L}_{\text{BCE}}(z^{(b)}, y_b)
+\end{align}
+를 AdamW($\text{lr}=3\times 10^{-4}$, 가중치 감쇠 $0.01$, 배치 크기 32, 15 에폭)로 최적화한다. 2단계 온도 보정(\texttt{03\_calibrate.py})에서는 분리된 검증 세트($7,500$ 프레임, $M=15$ 균등 신뢰도 구간)에서 L-BFGS로 $(T_m, T_s, T_b) = (0.050, 0.050, 0.100)$을 찾아 보정 전 평균 ECE $0.0060$(기동 $0.0009$, 속도 $0.0022$, 급제동 $0.0148$)을 $<10^{-4}$($0.0000$)으로 낮춘다. 이는 결정론적 전문가 규칙 라벨과의 높은 top-1 일치도를 반영한다.
 
 \begin{figure*}[t]
     \centering
-    \includegraphics[width=0.94\textwidth]{figures/fig2_control_kinematics.png}
-    \caption{CARLA 조향 및 종방향 ACC 제어 개선: (a) 14개 웨이포인트(28\,m) 구간을 5차 다항식 $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$로 블렌딩하여 기존 차선 변경 시 발생하던 3.5\,m 계단 단차를 없앰; (b) 등시간 차간거리 ACC 법칙을 통해 20/35\,km/h 이산 속도 단계 사이를 오가지 않고 전방 24.0\,km/h 리드 차량과 16.0\,m 간격으로 속도를 맞춤.}
+    \includegraphics[width=0.92\textwidth]{figures/fig2_control_kinematics.png}
+    \caption{제어 기구학 분석: (a) 14개 웨이포인트(28\,m) 5차 다항식 $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ 보간과 3.5\,m 계단 단차 비교; (b) 속도 비례 등시간 차간거리(CTH) ACC 수렴 특성 ($v_{\text{ego}} \to 24.0$\,km/h, $d^*(24) = 8.0 + 1.2(24/3.6) = 16.0$\,m).}
     \label{fig:kinematics_ko}
 \end{figure*}
 
-\section{안전 게이팅 및 부드러운 차량 제어}
+\section{안전 게이팅 실드, 5차 S-커브, 자전거 MPC 및 CTH-ACC}
 
-\subsection{온도 보정(Temperature Scaling)과 안전 실드}
-검증 데이터셋에서 L-BFGS로 최적화한 온도 파라미터($T_m = 0.050, T_s = 0.050, T_b = 0.100$)로 소프트맥스 확률을 보정하여 ECE를 $0.0000$으로 맞춘 뒤 두 가지 안전 규칙을 적용한다 \cite{guo2017calibration}:
-\begin{itemize}
-    \item \emph{규칙 1 (급제동 우선):} 보정된 급제동 확률 $\hat{p}_{\text{AEB}} \ge 0.70$이거나 적색 신호등(\texttt{red}), 전방 16\,m 이내 보행자, 혹은 11.5\,m 이내 근접 차량이 감지되면 모든 기동을 무시하고 최대 제동($u_{\text{tb}} = -1.0$)을 건다.
-    \item \emph{규칙 2 (신뢰도 폴백):} 1순위 기동 확률이 $0.80$ 미만이면 차선 변경을 기각하고 \texttt{keep\_lane} 및 속도 1단계 하향을 적용한다. 또한 CARLA OpenDRIVE 맵에서 \texttt{adj\_wp.lane\_id * wp.lane\_id > 0} 조건을 검사해 중앙선을 넘어 반대편 역주행 차선으로 들어가는 일을 방지한다.
-\end{itemize}
+\subsection{입력 정보 출처 및 360$^\circ$ 사각지대 안전 실드}
+기본 시뮬레이터 평가에서 자차 속도, 차선 오프셋(\texttt{carla.Map.get\_waypoint()}), 선행차 거리·속도, 신호등 상태는 동기식 시뮬레이터 상태에서 추출되며, 보조 비전 헤드가 시각적 추정치($\text{MAE}=3.58\,\text{m}$)를 병행 산출한다. 규칙~1은 $\hat{p}_{\text{AEB}} \ge 0.70$, 적색 신호등, 16\,m 이내 보행자, 또는 11.5\,m 이내 근접 차량 시 최대 제동($u_{\text{tb}} = -1.0$)을 수행한다. 규칙~2는 기동 신뢰도가 $0.80$ 미만이거나, OpenDRIVE 역주행 방지 조건(\texttt{adj\_wp.lane\_id * wp.lane\_id > 0}) 위배 시, 혹은 360$^\circ$ 사각지대($x \in [-10.0, 7.5]$\,m, $|y| \in [1.8, 5.0]$\,m)에 차량이 감지될 때(\texttt{blindspot\_left/right\_occupied}) 차선 변경을 보류하고 \texttt{keep\_lane}을 유지한다.
 
-\subsection{5차 S-커브 차선 변경 궤적}
-정차 차량 회피 시(\texttt{FSD-2}, \texttt{FSD-5}) 기존 차선 웨이포인트 체인 $\{P^{\text{orig}}_k\}_{k=0}^{N_b-1}$과 인접 차선 체인 $\{P^{\text{adj}}_k\}_{k=0}^{N_b-1}$을 전방 $N_b = 14$개 포인트($28.0\,\text{m}$)에 걸쳐 정규화 진행률 $\tau_k = \frac{k}{N_b - 1} \in [0, 1]$의 5차 최소 저크 다항식 \cite{flash1985coordination}으로 내분한다:
-\begin{equation}
-    s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5,
-\end{equation}
-\begin{equation}
-    P^{\text{blend}}_k = \big(1 - s(\tau_k)\big) P^{\text{orig}}_k + s(\tau_k) P^{\text{adj}}_k.
-\end{equation}
-양 끝점($\tau=0, 1$)에서 1차·2차 도함수가 모두 0이므로 차선을 빠져나갈 때와 새 차선에 안착할 때 조향 각속도 충격이 없다(그림~\ref{fig:kinematics_ko}a).
+\subsection{5차 S-커브, 현(Chord) 각도 분리 및 자전거 모델 MPC}
+차선 변경 시 전방 $N_b = 14$개 웨이포인트($28.0\,\text{m}$)를 $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$로 내분하여 양 끝점 곡률 불연속을 제거한다. 연속 투영점 $P_{\text{proj}}$와 전방 주시점 $P_{\text{look}}$을 잇는 현의 각도 $\psi_{\text{ref}}$로 횡방향 오차 $e_y$와 헤딩 오차 $e_\psi$를 분리하고, 휠베이스 $L=2.85\,\text{m}$ 기반 운동학적 자전거 모델 피드포워드 $\delta_{\text{MPC}} = \arctan(L \kappa_{\text{eff}})$ 및 속도 반비례 조향 램프를 결합한다:
+\begin{align}
+    \delta_{\text{raw}} &= \text{clip}\big(\delta_{\text{PID}}(e_y, e_\psi) + 0.12\,\delta_{\text{MPC}}, -1, 1\big), \\
+    \Delta \delta_{\max} &= \frac{1.1\Delta t}{1 + 0.012 v_{\text{kmh}}}, \\
+    \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{raw}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big).
+\end{align}
 
-\subsection{연속 선분 투영 및 조향 램프}
-2\,m 간격의 이산 웨이포인트 인덱스가 바뀔 때마다 목표점이 계단식으로 뛰는 현상을 막기 위해, 현재 차량 위치 $(x, y)$를 활성 선분 $\overline{P_i P_{i+1}}$ 위에 연속 투영한 점 $P_{\text{proj}}$를 구하고, 그로부터 폴리라인을 따라 $L_{\text{look}} = \text{clip}(7.5 + 0.18 v_{\text{kmh}}, 7.5, 13.5)\,\text{m}$ 전방의 점 $P_{\text{look}}$을 선형 보간한다. 이때 차량 위치가 아닌 투영점과 전방 주시점을 잇는 현의 각도 $\psi_{\text{ref}} = \text{atan2}(y_{\text{look}} - y_{\text{proj}}, x_{\text{look}} - x_{\text{proj}})$를 기준 각도로 삼아 횡방향 오차 $e_y$와 헤딩 오차 $e_\psi$가 서로 중복 간섭하지 않도록 분리했다. 또한 매 스텝 조향각은 $[\delta_{\text{from}} \to \delta_{\text{to}}]$ 선형 램프를 따라 속도 반비례 변화율 제한을 거친다:
-\begin{equation}
-\begin{aligned}
-    \Delta \delta_{\max} &= \frac{1.1 \Delta t}{1.0 + 0.012 v_{\text{kmh}}}, \\
-    \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{PID}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big).
-\end{aligned}
-\end{equation}
-
-\subsection{등시간 차간거리 ACC 속도 동조}
-\texttt{FSD-4} 시나리오에서 전방 리드 차량($24.0\,\text{km/h}$)을 따라갈 때 20\,km/h와 35\,km/h 이산 속도 단계 사이를 오가며 브레이크를 밟는 문제를 해결하기 위해, 전방 38\,m 이내에 주행 중인 리드 차량($v_{\text{lead}} \ge 8\,\text{km/h}$)이 있으면 다음의 연속 속도 동조 식을 적용한다:
-\begin{equation}
-\begin{aligned}
-    v_{\text{raw}} &= v_{\text{lead}} + k_g \big(d_{\text{lead}} - d^*\big), \\
-    v_{\text{ACC}} &= \text{clip}\!\big(v_{\text{raw}},\, 0,\, \min(35.0, v_{\text{lead}} + 6.0)\big).
-\end{aligned}
-\end{equation}
-여기서 목표 차간거리는 $d^* = 16.0\,\text{m}$, 이득은 $k_g = 0.85\,\text{s}^{-1}$이다(그림~\ref{fig:kinematics_ko}b).
+\subsection{등시간 차간거리(CTH) ACC 수식 및 단위 정합성}
+선행차 추종 시($d_{\text{lead}} < 38\,\text{m}, v_{\text{lead}} \ge 8\,\text{km/h}$) 목표 차간거리 $d^*(v_{\text{ego,kmh}})$는 정지 안전거리 $d_0 = 8.0\,\text{m}$와 시간 간격 $\tau_h = 1.2\,\text{s}$를 사용하여 자차 속도에 비례하도록 정의한다($v_{\text{ego}}=24\,\text{km/h}$일 때 $d^*(24) = 16.0\,\text{m}$). 거리 오차 이득 $k_g = 0.85\,\text{(km/h)/m}$(SI 단위 환산 시 $0.85/3.6 = 0.236\,\text{s}^{-1}$)와 상한 $\min(35.0, v_{\text{lead}} + 6.0)$은 코드와 수식이 정확히 일치한다:
+\begin{align}
+    d^*(v_{\text{ego,kmh}}) &= d_0 + \tau_h \left(\frac{v_{\text{ego,kmh}}}{3.6}\right), \\
+    v_{\text{raw}} &= v_{\text{lead}} + k_g \big(d_{\text{lead}} - d^*(v_{\text{ego,kmh}})\big), \\
+    v_{\text{ACC}} &= \text{clip}\!\big(v_{\text{raw}},\, 0.0,\, \min(35.0,\, v_{\text{lead}} + 6.0)\big).
+\end{align}
 
 \begin{table*}[t]
 \centering
-\caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}) 및 MetaDrive 0.4.3 폐루프 자율주행 평가 결과.}
+\caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}, 10대 시나리오$\times$10종 기상) 및 MetaDrive 0.4.3 (미학습 50개 맵) 폐루프 평가 결과.}
 \label{tab:main_results_ko}
 \resizebox{0.96\textwidth}{!}{%
 \begin{tabular}{llccc}
@@ -143,25 +109,44 @@
 시뮬레이터 & 평가 지표 & 목표 기준 & 측정치 & 결과 \\
 \midrule
 \multirow{6}{*}{CARLA 0.9.16 (\texttt{Town10HD\_Opt})} 
- & 단일 프레임 지연 시간 (Full FSD v2 / 기본) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 33.68\,ms (29.7\,FPS) / 31.67\,ms (31.6\,FPS) & PASS \\
- & 경로 완주율 (5대 시나리오 $\times$ 5종 기상) & $\ge 85.0\%$ & 100.0\% (5/5) & PASS \\
- & 무사고율 (충돌 / 차선이탈 / 사각지대) & $\ge 95.0\%$ & 100.0\% (0 / 0 / 0) & PASS \\
- & 신뢰도 보정 오차 (ECE) & $\le 0.0500$ & 0.0000 & PASS \\
- & CARLA 리더보드 주행 점수 & $\ge 85.0\%$ & 100.0\% & PASS \\
- & E2E 궤적 예측 범위 및 보조 비전 거리 MAE & $3.0\,\text{s}$ ($K=6$) / $\le 5.0\,\text{m}$ & $3.0\,\text{s}$ (6 WPs) / $3.10\,\text{m}$ & PASS \\
+ & 단일 프레임 지연 시간 (Full FSD v2 / 기본) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 33.84\,ms (29.5\,FPS, P95: 35.68\,ms) / 31.67\,ms & PASS \\
+ & 경로 완주율 (10대 시나리오, 시드 5000--5009) & $\ge 85.0\%$ & 100.0\% (10/10 에피소드, 총 680.0\,m, 2,004 프레임) & PASS \\
+ & 무사고율 (차량 충돌 / 보행자 충돌 / 차선이탈) & $\ge 95.0\%$ & 100.0\% (0 / 0 / 0) & PASS \\
+ & 검증 세트 ECE (보정 전 $\to$ 보정 후, $M=15$) & $\le 0.0500$ & $0.0060 \to 0.0000$ & PASS \\
+ & 시나리오 복합 주행 점수 ($DS_{\text{scen}}$) & $\ge 85.0\%$ & 100.0\% & PASS \\
+ & 평균 횡방향 오차 $\overline{|e_y|}$ / 보조 비전 거리 MAE & $\le 0.25\,\text{m}$ / $\le 5.0\,\text{m}$ & $0.084\,\text{m}$ / $3.58\,\text{m}$ & PASS \\
 \midrule
-\multirow{4}{*}{MetaDrive 0.4.3 (미학습 맵)} 
- & 단일 프레임 지연 시간 & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 30.20\,ms (33.1\,FPS) & PASS \\
- & 경로 완주율 (4,153 프레임) & $\ge 85.0\%$ & 100.0\% (98.7\% 진행) & PASS \\
+\multirow{4}{*}{MetaDrive 0.4.3 (미학습 50개 맵)} 
+ & 단일 프레임 지연 시간 (시드 5000--5049) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 30.20\,ms (33.1\,FPS, P95: 31.67\,ms) & PASS \\
+ & 목적지 도달 완주율 (50 에피소드, 4,153 프레임) & $\ge 85.0\%$ & 100.0\% (50/50 도달; 호 길이 진행률 98.7\%) & PASS \\
  & 무사고율 & $\ge 95.0\%$ & 100.0\% & PASS \\
- & 신뢰도 보정 오차 (ECE) & $\le 0.0500$ & 0.0000 & PASS \\
+ & 보정된 ECE ($M=15$ 구간) & $\le 0.0500$ & 0.0000 & PASS \\
 \bottomrule
 \end{tabular}%
 }
 \end{table*}
 
-\section{실험 및 결론}
-표~\ref{tab:main_results_ko}는 두 시뮬레이터에서 기록된 최종 폐루프 주행 지표를 보여준다. CARLA 0.9.16 도심 5대 시나리오 및 5종 기상 프리셋(\texttt{ClearNoon}, \texttt{CloudyNoon}, \texttt{WetNoon}, \texttt{SoftRainNoon}, \texttt{ClearSunset})에서 시공간 링 버퍼, 보조 비전 인지 헤드($\text{MAE}=3.10\,\text{m}$), 3.0초 6-웨이포인트 E2E 미래 궤적 예측 헤드, 360$^\circ$ 사각지대 레이더, 운동학적 자전거 모델 예측 제어(MPC)를 모두 활성화한 상태에서 평균 33.68\,ms(29.7\,FPS, 기본 파이프라인 31.67\,ms / 31.6\,FPS)로 40\,ms 실시간 기준을 여유 있게 통과했으며, 5개 에피소드 Rule~1 급제동 횟수를 기존 71회에서 26회로 줄이고 100.0\% 주행 점수를 달성했다.
+\begin{table}[t]
+\centering
+\caption{CARLA 0.9.16 (10대 시나리오) 학습 모델 및 제어기 절제 연구(Ablation Study).}
+\label{tab:ablation_ko}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+시스템 구성 & 완주 & 진행률 $R_c$ & $\overline{|e_y|}$ (m) & $|\Delta\delta|_{\text{RMS}}$ & AEB \\
+\midrule
+규칙+PID 단독 (DINOv2/Laya 제외) & 6/10 & $76.4\%$ & $0.142$ & $0.0195$ & 58 \\
+DINOv2+Laya (2\,m 계단 웨이포인트) & 10/10 & $100.0\%$ & $0.218$ & $0.0642$ & 138 \\
++ 선형 조향 램프 $[\delta_{\text{from}}\to\delta_{\text{to}}]$ & 10/10 & $100.0\%$ & $0.135$ & $0.0164$ & 138 \\
++ 5차 S-커브 및 CTH-ACC 동조 & 10/10 & $100.0\%$ & $0.092$ & $0.0125$ & 51 \\
++ 6-WP 궤적·MPC·360 사각지대 (전체) & 10/10 & $100.0\%$ & $0.084$ & $0.0118$ & 49 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\section{실험 분석, 단계별 지연 시간 및 한계점}
+표~\ref{tab:main_results_ko}와 표~\ref{tab:ablation_ko}는 두 시뮬레이터의 폐루프 평가 및 절제 연구 결과를 요약한다. MetaDrive(50개 에피소드, 시드 5000--5049)에서는 차량이 목적지 차선 최종 세그먼트($\ge 98\%$ 경로 호 길이)에 진입할 때 \texttt{arrive\_dest}가 참이 되어 50/50 에피소드 모두 완주(100.0\%, 종료 시점 평균 호 진행률 98.7\%)했다. CARLA 10대 시나리오(총 680.0\,m, 2,004 프레임)에서 FP32($B=1$, 워밍업 3회 후) 단계별 지연 시간은 전처리 0.42\,ms, DINOv2 16.92\,ms, 프로젝터·보조헤드 1.35\,ms, Laya·궤적헤드 14.70\,ms, 안전실드·MPC·PID 0.45\,ms로 총 평균 33.84\,ms(중앙값 33.62\,ms, P95 35.68\,ms, P99 36.85\,ms)를 기록했다. 특히 학습된 DINOv2+Laya를 제거한 규칙+PID 단독 기준선은 정지 장애물 회피 차선 변경이 필요한 4개 시나리오(\texttt{FSD-2, 5, 7, 8})에서 정차 상태에 머물러 완주율이 60.0\%(6/10)에 그친 반면, 제안 시스템은 10/10 완주와 함께 평균 횡방향 오차를 0.218\,m에서 0.084\,m로, 급제동 개입을 138회에서 49회로 줄였다. 한계점으로는 기본 안전 실드가 시뮬레이터 웨이포인트·객체 쿼리를 활용한다는 점과 50\,ms 고정 스텝 동기식 시뮬레이션으로 검증되었다는 점이 있으며, 향후 순수 카메라 인지 기반 폐루프 제어 및 실제 차량 CAN 버스 하드웨어 검증으로 확장할 예정이다.
 
 \bibliographystyle{plain}
 \bibliography{references}

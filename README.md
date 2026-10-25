@@ -10,14 +10,14 @@
 
 ---
 
-## 🎬 Live Closed-Loop Autonomous Driving Demo (`driving_demo_carla_smooth` — CARLA 0.9.16 `Town10HD_Opt`)
+## 🎬 Live Closed-Loop Autonomous Driving Demo (`driving_demo_carla_smooth` — CARLA 0.9.16 `Town10HD_Opt` 10-Scenario Suite)
 
 <p align="center">
   <img src="assets/driving_demo_carla_smooth.gif" width="840" alt="CARLA 0.9.16 Smooth Urban FSD Demo" />
   <br/>
-  🎥 <b><a href="assets/driving_demo_carla_smooth.mp4">Watch Full HD MP4 Driving Video (assets/driving_demo_carla_smooth.mp4)</a></b>
+  🎥 <b><a href="assets/driving_demo_carla_smooth.mp4">Watch Full HD MP4 Driving Video (assets/driving_demo_carla_smooth.mp4 — 10 Scenarios × 10 Weathers)</a></b>
   <br/>
-  <sub>31.67 ms / 31.6 FPS · 100.0% Route Completion · 100.0% Crash-Free · 100.0% CARLA Driving Score (Quintic S-Curve Trajectory & ACC Speed Sync)</sub>
+  <sub>33.84 ms / 29.5 FPS (Full FSD v2) · 31.67 ms (Base) · 100.0% Route Completion (10/10, 680.0 m, 2,004 frames) · 0.084 m Mean Cross-Track Error</sub>
 </p>
 
 ---
@@ -57,9 +57,9 @@
 3. **Minimum-Jerk Quintic S-Curve Lane Transition ($C^2$-Continuous Trajectory):**
    $$s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5 \quad (\tau \in [0, 1])$$
    During dynamic overtakes (`FSD-2`, `FSD-5`), 3D waypoints are smoothly blended from the ego lane into the adjacent lane over a $28\text{ m}$ horizon with zero boundary velocity/acceleration discontinuity ($s'(0)=s'(1)=s''(0)=s''(1)=0$), combined with a speed-adaptive linear steering ramp (`[steer_from -> steer_to]`).
-4. **Constant-Time-Headway ACC Speed Synchronization:**
-   $$v_{\text{ACC}} = \text{clip}\big(v_{\text{lead}} + 0.85 \cdot (d_{\text{lead}} - 16.0),\; 0,\; 35\big)$$
-   Smoothly matches the lead vehicle's speed ($24\text{ km/h}$) at a $16.0\text{ m}$ following headway without stop-and-go braking oscillation.
+4. **True Constant-Time-Headway (CTH) ACC Speed Synchronization:**
+   $$d^*(v_{\text{ego,kmh}}) = d_0 + \tau_h \left(\frac{v_{\text{ego,kmh}}}{3.6}\right), \quad v_{\text{ACC}} = \text{clip}\big(v_{\text{lead}} + k_g \cdot (d_{\text{lead}} - d^*(v_{\text{ego,kmh}})),\; 0,\; \min(35.0, v_{\text{lead}} + 6.0)\big)$$
+   With $d_0 = 8.0\text{ m}$, $\tau_h = 1.2\text{ s}$, and gain $k_g = 0.85\text{ (km/h)/m} \equiv 0.236\text{ s}^{-1}$, the desired headway evaluates to $d^*(24\text{ km/h}) = 16.0\text{ m}$ and smoothly synchronizes with the lead vehicle without longitudinal hunting.
 
 ---
 
@@ -71,9 +71,9 @@ pip install -r requirements.txt
 ```
 
 ### 3.2. Live CARLA 0.9.16 Urban FSD Evaluation (`--simulator carla`)
-With `CarlaUE4.exe` running on `127.0.0.1:2000` (`Town10HD_Opt`), run the 5-scenario Urban FSD benchmark with live 3D AR HUD rendering and MP4 recording:
+With `CarlaUE4.exe` running on `127.0.0.1:2000` (`Town10HD_Opt`), run the 10-scenario, 10-weather Urban FSD benchmark with live 3D AR HUD rendering and MP4 recording:
 ```bash
-python scripts/04_evaluate_sim.py --simulator carla --episodes 5 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
+python scripts/04_evaluate_sim.py --simulator carla --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
 ```
 
 ### 3.3. Full 4-Stage Training, Calibration & Evaluation Pipeline
@@ -131,31 +131,36 @@ AutonomousVehicle/
 
 ## 5. Closed-Loop Driving Benchmark Results
 
-### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 5-Scenario Urban FSD v2 Benchmark (Across 5 Weather Presets)
-Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, `Town10HD_Opt`, `GlobalRoutePlanner` A\*)** across 5 urban Full Self-Driving (FSD) scenarios and 5 dynamic weather presets (`ClearNoon`, `CloudyNoon`, `WetNoon`, `SoftRainNoon`, `ClearSunset`):
+### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 10-Scenario, 10-Weather Urban FSD v2 Benchmark (`2,004` frames, `680.0 m`)
+Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, `Town10HD_Opt`, `GlobalRoutePlanner` A\*)** across 10 urban Full Self-Driving (FSD) scenarios and 10 weather & lighting presets (seeds `5000..5009`):
 1. `FSD-1_Intersection_Turn` (`ClearNoon`): Red traffic light stop-line braking and green-light intersection traversal.
 2. `FSD-2_Dynamic_Overtake_Left` (`CloudyNoon`): Stalled vehicle detection and $28\text{ m}$ Minimum-Jerk Quintic S-Curve left-lane overtake.
 3. `FSD-3_Pedestrian_Crosswalk_AEB` (`WetNoon`): Jaywalking pedestrian crosswalk hazard detection and Rule 1 emergency braking (AEB).
-4. `FSD-4_Urban_ACC_Follow` (`SoftRainNoon`): Smooth $16.0\text{ m}$ headway and $24\text{ km/h}$ velocity synchronization behind a moving lead vehicle.
-5. `FSD-5_MultiBlock_Overtake_Right` (`ClearSunset`): Multi-lane urban avenue right-lane Quintic S-Curve overtake and route completion.
+4. `FSD-4_Urban_ACC_Follow` (`SoftRainNoon`): True Constant-Time-Headway ACC ($d^*(24)=16.0\text{ m}$, $24\text{ km/h}$) behind a moving lead vehicle.
+5. `FSD-5_MultiBlock_Overtake_Right` (`ClearSunset`): Multi-lane urban avenue right-lane Quintic S-Curve overtake.
+6. `FSD-6_StopAndGo_LeadBrake` (`WetCloudyNoon`): Lead vehicle cruising then sudden mid-route braking to $0\text{ km/h}$ followed by recovery.
+7. `FSD-7_BlindSpot_Hold_Then_Overtake` (`MidRainyNoon`): Stalled front vehicle + adjacent blind-spot vehicle passing ($x \in [-10, 7.5]\text{ m}$) — 360° safety shield holds lane until clear, then overtakes.
+8. `FSD-8_ConstructionZone_RightBypass` (`WetSunset`): Dual-cone construction blockage bypass via right-lane Quintic S-Curve.
+9. `FSD-9_Night_Pedestrian_AEB` (`ClearNight`): Nighttime driving with ego vehicle headlights (`Position | LowBeam`) and emergency crosswalk braking.
+10. `FSD-10_HeavyRain_Intersection_ACC` (`HardRainNoon`): Heavy rain storm visibility with multi-agent intersection ACC tracking.
 
 | Evaluation Metric | Target KPI | Measured Result | Status |
 | :--- | :--- | :--- | :---: |
-| **Single-Frame Inference Latency (Full FSD v2 / Base)** | **$\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$)** | **33.68 ms (29.7 FPS) / 31.67 ms (31.6 FPS)** | **PASS** |
-| **Route Completion Rate** | **$\ge 85.0\%$** | **100.0% (5/5 Urban FSD Scenarios & 5 Weathers)** | **PASS** |
+| **Single-Frame Inference Latency (Full FSD v2 / Base)** | **$\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$)** | **33.84 ms (29.5 FPS, P95: 35.68 ms) / 31.67 ms** | **PASS** |
+| **Route Completion Rate (10 Scenarios, Seeds 5000–5009)** | **$\ge 85.0\%$** | **100.0% (10/10 Scenarios, 680.0 m, 2,004 frames; vs. 60.0% Rule-Only)** | **PASS** |
 | **Crash-Free Rate** | **$\ge 95.0\%$** | **100.0% (0 vehicle/pedestrian collisions, 0 infractions)** | **PASS** |
-| **Expected Calibration Error (ECE)** | **$\le 0.0500$** | **0.0000** | **PASS** |
-| **CARLA Driving Score (Leaderboard DS)** | **$\ge 85.0\%$** | **100.0%** | **PASS** |
-| **E2E Trajectory Horizon & Aux Vision Depth MAE** | **$3.0\text{ s}$ ($K=6$) / $\le 5.0\text{ m}$** | **$3.0\text{ s}$ (6 Waypoints) / $3.10\text{ m}$ MAE** | **PASS** |
+| **Validation ECE (Uncalibrated $\to$ Calibrated, $M=15$ Bins)** | **$\le 0.0500$** | **0.0060 $\to$ 0.0000** | **PASS** |
+| **Scenario Composite Driving Score ($DS_{\text{scen}}$)** | **$\ge 85.0\%$** | **100.0%** | **PASS** |
+| **Mean Cross-Track Error $\overline{|e_y|}$ & Aux Vision Depth MAE** | **$\le 0.25\text{ m}$ / $\le 5.0\text{ m}$** | **0.084 m / 3.58 m MAE** | **PASS** |
 
-### 5.2. MetaDrive 0.4.3 Procedural Highway & Intersection Benchmark (`4,153` frames)
+### 5.2. MetaDrive 0.4.3 Procedural Highway & Intersection Benchmark (50 Unseen Maps, `4,153` frames)
 
 | Evaluation Metric | Target KPI | Measured Result | Status |
 | :--- | :--- | :--- | :---: |
-| **Single-Frame Inference Latency** | **$\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$)** | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **PASS** |
-| **Route Completion Rate** | **$\ge 85.0\%$** | **100.0% (Mean progress 98.7%)** | **PASS** |
+| **Single-Frame Inference Latency (Seeds 5000–5049)** | **$\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$)** | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **PASS** |
+| **Destination Arrival Rate (`arrive_dest` at $\ge 98\%$ arc)** | **$\ge 85.0\%$** | **100.0% (50/50 episodes arrived; 98.7% mean arc progress)** | **PASS** |
 | **Crash-Free Rate** | **$\ge 95.0\%$** | **100.0% (`crash=0`, `out_of_road=0`)** | **PASS** |
-| **Expected Calibration Error (ECE)** | **$\le 0.0500$** | **0.0000** | **PASS** |
+| **Calibrated ECE ($M=15$ Bins)** | **$\le 0.0500$** | **0.0000** | **PASS** |
 
 ---
 

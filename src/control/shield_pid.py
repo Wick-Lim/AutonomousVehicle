@@ -211,14 +211,20 @@ class SafetyShieldPID:
         if lead_distance_m < 38.0 and gated_speed_level > 0:
             lead_speed_kmh = float(telemetry.get("lead_speed_kmh", target_speed_kmh))
             if lead_speed_kmh >= 8.0 and not self.use_mock:
-                # Smooth Constant-Time-Headway ACC speed synchronization (locks onto 16.0m headway at v_lead)
-                desired_gap_m = 16.0
+                # True Constant-Time-Headway (CTH) ACC: d*(v_ego) = d_0 + tau_h * (v_ego_kmh / 3.6)
+                # With d_0 = 8.0 m, tau_h = 1.2 s (equals 16.0 m at v_ego = 24 km/h),
+                # and proportional gain k_g = 0.85 (km/h)/m (equivalent to 0.236 s^-1 in SI units).
+                d0_m = 8.0
+                tau_h_s = 1.2
+                kg_kmh_per_m = 0.85
+                desired_gap_m = d0_m + tau_h_s * (current_speed_kmh / 3.6)
                 gap_error_m = lead_distance_m - desired_gap_m
+                acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
                 acc_sync_speed = float(
                     np.clip(
-                        lead_speed_kmh + 0.85 * gap_error_m,
+                        lead_speed_kmh + kg_kmh_per_m * gap_error_m,
                         0.0,
-                        max(target_speed_kmh, min(35.0, lead_speed_kmh + 6.0)),
+                        acc_upper_kmh,
                     )
                 )
                 target_speed_kmh = acc_sync_speed
