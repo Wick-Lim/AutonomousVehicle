@@ -411,6 +411,7 @@ def main() -> None:
                     if key == 27 or key == ord("q"):
                         done = True
 
+            setattr(env, "_last_gated_maneuver", str(gated_info.get("maneuver", "keep_lane")))
             rgb, telemetry, _, done_step, info = env.step(control_action)
             done = bool(done or done_step)
 

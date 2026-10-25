@@ -603,6 +603,7 @@ class CarlaWrapper:
         self._lead_route_idx = 8
         self._spectator_cam_state = None
         self._carla_steer_prev = 0.0
+        self._last_gated_maneuver = "keep_lane"
 
         scenario_idx = int(abs(seed - 5000)) % len(FSD_SCENARIO_NAMES)
         self._fsd_scenario_name = FSD_SCENARIO_NAMES[scenario_idx]
@@ -1358,10 +1359,17 @@ class CarlaWrapper:
             if d_obs <= 34.0:
                 exp_man = "change_left"
                 nav_command = "turn_left"
-                lead_distance_m = 26.0
-                lead_speed_kmh = 26.0
-                if not self._fsd_lane_changed:
+                if (
+                    not self._fsd_lane_changed
+                    and getattr(self, "_last_gated_maneuver", "keep_lane") == "change_left"
+                ):
                     self._switch_route_to_adjacent_lane("left")
+                if not self._fsd_lane_changed and d_obs <= 18.0:
+                    lead_distance_m = d_obs
+                    lead_speed_kmh = 0.0
+                else:
+                    lead_distance_m = 26.0
+                    lead_speed_kmh = 26.0
                 if self._fsd_lane_changed and self._route_wp_idx >= self._lane_change_end_idx:
                     self._fsd_event_resolved = True
         elif (
@@ -1374,10 +1382,8 @@ class CarlaWrapper:
             if d_obs <= 35.5:
                 exp_man = "change_left"
                 nav_command = "turn_left"
-                lead_distance_m = 26.0
-                lead_speed_kmh = 26.0
                 if self._fsd_stop_hold_steps < 5 and not self._fsd_lane_changed:
-                    # Simulate adjacent vehicle occupying left blind-spot zone for 5 frames before clearing
+                    # Adjacent vehicle occupies left blind-spot zone for 5 frames before clearing
                     blind_spot_left = True
                     self._blind_spot_left = True
                     self._fsd_stop_hold_steps += 1
@@ -1386,10 +1392,19 @@ class CarlaWrapper:
                 else:
                     blind_spot_left = False
                     self._blind_spot_left = False
-                    if not self._fsd_lane_changed:
+                    if (
+                        not self._fsd_lane_changed
+                        and getattr(self, "_last_gated_maneuver", "keep_lane") == "change_left"
+                    ):
                         self._switch_route_to_adjacent_lane("left")
                     if self._fsd_lane_changed and self._route_wp_idx >= self._lane_change_end_idx:
                         self._fsd_event_resolved = True
+                if not self._fsd_lane_changed and d_obs <= 18.0:
+                    lead_distance_m = d_obs
+                    lead_speed_kmh = 0.0
+                else:
+                    lead_distance_m = 26.0
+                    lead_speed_kmh = 26.0
         elif (
             self._fsd_scenario_name
             in (
@@ -1404,12 +1419,19 @@ class CarlaWrapper:
             if d_obs <= 34.0:
                 exp_man = "change_right"
                 nav_command = "turn_right"
-                lead_distance_m = 26.0
-                lead_speed_kmh = 26.0
                 if self._fsd_scenario_name == "FSD-8_Construction_Zone_Bypass_Right":
                     traffic_light = "yellow"
-                if not self._fsd_lane_changed:
+                if (
+                    not self._fsd_lane_changed
+                    and getattr(self, "_last_gated_maneuver", "keep_lane") == "change_right"
+                ):
                     self._switch_route_to_adjacent_lane("right")
+                if not self._fsd_lane_changed and d_obs <= 18.0:
+                    lead_distance_m = d_obs
+                    lead_speed_kmh = 0.0
+                else:
+                    lead_distance_m = 26.0
+                    lead_speed_kmh = 26.0
                 if self._fsd_lane_changed and self._route_wp_idx >= self._lane_change_end_idx:
                     self._fsd_event_resolved = True
         elif (
@@ -1550,11 +1572,15 @@ class CarlaWrapper:
         return rgb, telemetry.to_json_dict(), info
 
     def step(
-        self, action: Tuple[float, float] | np.ndarray
+        self,
+        action: Tuple[float, float] | np.ndarray,
+        gated_maneuver: Optional[str] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any], float, bool, Dict[str, Any]]:
         """Execute `[steering, throttle_brake]` in CARLA (via `VehicleControl`) and return next state."""
         steering = float(np.clip(action[0], -1.0, 1.0))
         throttle_brake = float(np.clip(action[1], -1.0, 1.0))
+        if gated_maneuver is not None:
+            self._last_gated_maneuver = str(gated_maneuver)
         self._step_count += 1
 
         if not self.use_mock and self._world is not None and self._ego_vehicle is not None:

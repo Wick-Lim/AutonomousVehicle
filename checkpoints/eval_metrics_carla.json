@@ -1,19 +1,45 @@
 {
   "simulator": "carla",
+  "ablation_mode": "full",
   "episodes": 10,
-  "total_frames": 2004,
-  "mean_latency_ms": 33.84,
-  "p95_latency_ms": 35.68,
-  "fps": 29.5,
+  "seed_range": [
+    5000,
+    5009
+  ],
+  "total_frames": 1986,
+  "total_distance_driven_m": 680.0,
+  "mean_latency_ms": 33.4,
+  "p50_latency_ms": 33.22,
+  "p95_latency_ms": 34.37,
+  "p99_latency_ms": 37.11,
+  "fps": 29.9,
+  "stage_latency_breakdown_ms": {
+    "preprocess_crop_resize": 0.42,
+    "dinov2_vit_b14_frozen": 16.7,
+    "spatial_projector_temporal_aux": 1.34,
+    "laya_modernbert_e2e_traj": 14.7,
+    "safety_shield_bicycle_mpc_pid": 0.45
+  },
   "route_completion_rate_pct": 100.0,
   "mean_route_progress_pct": 100.0,
+  "scenario_composite_driving_score_pct": 100.0,
   "driving_score_pct": 100.0,
   "crash_free_rate_pct": 100.0,
+  "mean_cross_track_error_m": 0.085,
+  "rms_steer_delta": 0.0292,
+  "mean_speed_tracking_error_kmh": 11.61,
+  "uncalibrated_val_ece": {
+    "maneuver_ece": 0.0009,
+    "speed_ece": 0.0022,
+    "aeb_ece": 0.0148,
+    "mean_ece": 0.006,
+    "num_bins": 15
+  },
   "ece": 0.0,
   "online_sim_ece": 0.0,
   "e2e_trajectory_waypoints": 6,
   "e2e_trajectory_horizon_s": 3.0,
-  "vision_aux_lead_mae_m": 3.58,
+  "vision_aux_lead_mae_m": 3.36,
   "fsd_scenarios_tested": [
     "FSD-1_Intersection_Turn",
     "FSD-2_Dynamic_Overtake_Left",
@@ -52,7 +78,7 @@
     "off_road_infractions": 0
   },
   "shield_interventions": {
-    "rule1_emergency_brake": 49,
+    "rule1_emergency_brake": 51,
     "boundary_left_unavailable": 152,
     "boundary_right_unavailable": 158,
     "blindspot_left_occupied": 5
@@ -62,31 +88,5 @@
     "route_completion_ge_85pct": true,
     "crash_free_ge_95pct": true,
     "ece_le_0_05": true
-  },
-  "ablation_mode": "full",
-  "seed_range": [
-    5000,
-    5009
-  ],
-  "total_distance_driven_m": 680.0,
-  "p50_latency_ms": 33.62,
-  "p99_latency_ms": 36.85,
-  "stage_latency_breakdown_ms": {
-    "preprocess_crop_resize": 0.42,
-    "dinov2_vit_b14_frozen": 16.92,
-    "spatial_projector_temporal_aux": 1.35,
-    "laya_modernbert_e2e_traj": 14.7,
-    "safety_shield_bicycle_mpc_pid": 0.45
-  },
-  "scenario_composite_driving_score_pct": 100.0,
-  "mean_cross_track_error_m": 0.084,
-  "rms_steer_delta": 0.0118,
-  "mean_speed_tracking_error_kmh": 2.41,
-  "uncalibrated_val_ece": {
-    "maneuver_ece": 0.0009,
-    "speed_ece": 0.0022,
-    "aeb_ece": 0.0148,
-    "mean_ece": 0.006,
-    "num_bins": 15
   }
 }
