@@ -82,7 +82,7 @@ We flatten $G$ into 36 tokens, add a learnable parameter tensor $E_{\text{pos}} 
 \begin{equation}
     V_{\text{spatial}} = \text{MLP}\big(\text{Flatten}(G) + E_{\text{pos}}\big) \in \mathbb{R}^{B \times 36 \times 1024}.
 \end{equation}
-This adapter contains 1.85M parameters—the only weights updated during training.
+This adapter contains 1.85M parameters---the only weights updated during training.
 
 \subsection{Single-Pass Readout in Laya}
 Alongside the image, the wrapper packs current vehicle state into a compact JSON string containing speed (\texttt{speed\_kmh}), signed lateral offset (\texttt{lane\_offset\_m}), heading error (\texttt{heading\_error}), adjacent lane flags, navigation command, traffic light color, and hazard type. We tokenize this text and look up its word embeddings $E_{\text{telemetry}}$ from Laya's embedding matrix.
@@ -110,7 +110,7 @@ corresponding to maneuver (\texttt{keep\_lane}, \texttt{change\_left}, \texttt{c
 \label{sec:control}
 
 \subsection{Temperature Scaling and Gating Rules}
-Raw neural network logits tend to be overconfident. Following Guo et al.\ \cite{guo2017calibration}, we fit three scalar temperatures $(T_m, T_s, T_b)$ on validation rollouts using L-BFGS (`scripts/03\_calibrate.py`), yielding $T_m = 0.050, T_s = 0.050, T_b = 0.100$ and driving validation ECE to $0.0000$:
+Raw neural network logits tend to be overconfident. Following Guo et al.\ \cite{guo2017calibration}, we fit three scalar temperatures $(T_m, T_s, T_b)$ on validation rollouts using L-BFGS (\texttt{scripts/03\_calibrate.py}), yielding $T_m = 0.050, T_s = 0.050, T_b = 0.100$ and driving validation ECE to $0.0000$:
 \begin{equation}
     \hat{p}^{(m)} = \text{Softmax}\!\left(\frac{z^{(m)}}{T_m}\right), \quad
     \hat{p}_{\text{AEB}} = \sigma\!\left(\frac{z^{(b)}_1 - z^{(b)}_0}{T_b}\right).
@@ -119,11 +119,11 @@ Raw neural network logits tend to be overconfident. Following Guo et al.\ \cite{
 Before any command reaches the PID controllers, \texttt{SafetyShieldPID} checks two deterministic overrides:
 \begin{itemize}
     \item \emph{Rule 1 (Brake Override):} If $\hat{p}_{\text{AEB}} \ge 0.70$, or if telemetry reports \texttt{traffic\_light == "red"}, or a pedestrian lies within $16.0\,\text{m}$, or a closing lead vehicle is within $11.5\,\text{m}$, we force \texttt{keep\_lane} and set full braking ($u_{\text{tb}} = -1.0$).
-    \item \emph{Rule 2 (Confidence Fallback):} If $\max_c \hat{p}^{(m)}_c < 0.80$, lane changes are blocked (\texttt{keep\_lane}) and the requested speed tier is stepped down by one level. We also check OpenDRIVE lane topology (`left\_wp.lane\_id * wp\_curr.lane\_id > 0`) so the car never merges into an oncoming opposite-direction lane.
+    \item \emph{Rule 2 (Confidence Fallback):} If $\max_c \hat{p}^{(m)}_c < 0.80$, lane changes are blocked (\texttt{keep\_lane}) and the requested speed tier is stepped down by one level. We also check OpenDRIVE lane topology (\texttt{left\_wp.lane\_id * wp\_curr.lane\_id > 0}) so the car never merges into an oncoming opposite-direction lane.
 \end{itemize}
 
 \subsection{Quintic S-Curve Lane Transitions}
-In CARLA's OpenDRIVE map (\texttt{Town10HD\_Opt}), routes are represented as chains of waypoints spaced $2.0\,\text{m}$ apart. In our initial implementation, when the ego vehicle approached a stalled car (`FSD-2` or `FSD-5`) and switched its route list to `pivot\_wp.get\_left\_lane()`, the reference centerline jumped laterally by $3.5\,\text{m}$ between waypoint $i_0 - 1$ and waypoint $i_0$. That step discontinuity caused a massive derivative kick and a visible steering jerk.
+In CARLA's OpenDRIVE map (\texttt{Town10HD\_Opt}), routes are represented as chains of waypoints spaced $2.0\,\text{m}$ apart. In our initial implementation, when the ego vehicle approached a stalled car (\texttt{FSD-2} or \texttt{FSD-5}) and switched its route list to \texttt{pivot\_wp.get\_left\_lane()}, the reference centerline jumped laterally by $3.5\,\text{m}$ between waypoint $i_0 - 1$ and waypoint $i_0$. That step discontinuity caused a massive derivative kick and a visible steering jerk.
 
 To make lane changes feel natural, we generate both the original lane chain $\{P^{\text{orig}}_k\}_{k=0}^{N_b-1}$ and the adjacent lane chain $\{P^{\text{adj}}_k\}_{k=0}^{N_b-1}$ over $N_b = 14$ waypoints ($28.0\,\text{m}$). With normalized progress $\tau_k = \frac{k}{N_b - 1} \in [0, 1]$, we interpolate the 3D coordinates using a minimum-jerk quintic spline \cite{flash1985coordination}:
 \begin{equation}
@@ -218,7 +218,7 @@ We tested the full pipeline on two simulators:
 \subsection{Results and Ablation}
 Table~\ref{tab:main_results} lists the closed-loop metrics recorded in \texttt{checkpoints/eval\_metrics\_carla.json} and \texttt{checkpoints/eval\_metrics.json}. End-to-end inference averages 30.20\,ms (33.1\,FPS) in MetaDrive and 31.67\,ms (31.6\,FPS, P95: 32.89\,ms) in CARLA 0.9.16, staying comfortably under the 40\,ms real-time ceiling. All five urban FSD scenarios and all ten unseen MetaDrive maps finish with 100.0\% route completion, zero collisions, zero red-light or off-road infractions, and a 100.0\% CARLA Driving Score.
 
-Table~\ref{tab:ablation} compares three iterations of our low-level control loop in CARLA 0.9.16. While all three versions completed the routes without crashing, the baseline discrete waypoint tracker triggered 71 emergency brake interventions over the 5 episodes—most of them caused by speed-bucket hunting behind the lead car in \texttt{FSD-4} and brief deceleration before lane changes in \texttt{FSD-2}/\texttt{FSD-5}. Introducing the 28\,m quintic S-curve transition and continuous constant-time-headway ACC cut total Rule~1 AEB triggers from 71 to 27 (which correspond strictly to the mandatory red-light stop in \texttt{FSD-1} and the pedestrian crosswalk stop in \texttt{FSD-3}, with zero false triggers during \texttt{FSD-4} cruise following).
+Table~\ref{tab:ablation} compares three iterations of our low-level control loop in CARLA 0.9.16. While all three versions completed the routes without crashing, the baseline discrete waypoint tracker triggered 71 emergency brake interventions over the 5 episodes---most of them caused by speed-bucket hunting behind the lead car in \texttt{FSD-4} and brief deceleration before lane changes in \texttt{FSD-2}/\texttt{FSD-5}. Introducing the 28\,m quintic S-curve transition and continuous constant-time-headway ACC cut total Rule~1 AEB triggers from 71 to 27 (which correspond strictly to the mandatory red-light stop in \texttt{FSD-1} and the pedestrian crosswalk stop in \texttt{FSD-3}, with zero false triggers during \texttt{FSD-4} cruise following).
 
 \section{Conclusion}
 Replacing autoregressive token generation with a single bidirectional forward pass through a frozen DINOv2 + $4 \times 9$ SpatialProjector + Laya pipeline brings multimodal driving inference down to 31.67\,ms per frame. Pairing that fast high-level decision head with temperature-calibrated safety gating, quintic S-curve lane transitions, decoupled chord-angle tracking, and constant-time-headway ACC produces smooth, collision-free closed-loop driving in both MetaDrive and CARLA 0.9.16.
