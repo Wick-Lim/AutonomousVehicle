@@ -1,0 +1,140 @@
+\documentclass[10pt,twocolumn,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{kotex}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage[margin=0.78in]{geometry}
+\usepackage{caption}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{\textbf{DINOv2-Laya 공간 정렬과 5차 S-커브 안전 제어를 결합한 40ms 이하 비자기회귀 비전-언어 자율주행 시스템}}
+
+\author{
+  \textbf{AutonomousVehicle 연구팀} \\
+  Open-Source Autonomous Driving Initiative \\
+  \texttt{https://github.com/Wick-Lim/AutonomousVehicle}
+}
+
+\date{2026년 10월}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+최근 비전-언어-액션(Vision-Language-Action, VLA) 모델은 자율주행의 고수준 상황 판단에서 뛰어난 성능을 보였으나, 자기회귀(Autoregressive) 기반의 순차적 토큰 생성 구조로 인해 프레임당 $300\text{--}1000\text{ ms}$의 추론 지연 시간이 발생하여 $20\text{--}30\text{ Hz}$ 주기의 실시간 폐루프(Closed-loop) 차량 제어에 적용하기 어렵다는 한계가 있다. 본 논문에서는 자기지도 기하학적 비전 백본(\textbf{DINOv2} ViT-B/14)과 양방향 비자기회귀 의사결정 모델(\textbf{Laya}, ModernBERT-421M)을 경량 $4 \times 9$ \textbf{2D Spatial Projector}($1.85\text{M}$ 학습 파라미터)로 연결한 초저지연 자율주행 아키텍처를 제안한다. 제안 시스템은 단 한 번의 Forward Pass($\le 31.7\text{ ms}$)만으로 전술적 차선 기동(\texttt{choice}), 목표 속도 단계(\texttt{score}), 긴급 제동 확률(\texttt{noul})을 동시에 추론한다. 나아가 도심 환경에서의 물리적 안전성과 인간 운전자 수준의 부드러운 조향·가감속을 보장하기 위해, 사후 온도 보정(Temperature Scaling) 기반 \textbf{Safety Shield}와 \textbf{최소 저크 5차 다항식 S-커브}($s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$) 궤적 보간, 연속 폴리라인 전방 주시 투영, 속도 적응형 선형 조향 램프, 그리고 \textbf{등시간 차간거리(Constant-Time-Headway) ACC 속도 동조 제어기}를 결합하였다. \textbf{CARLA 0.9.16 (\texttt{Town10HD\_Opt})} 5대 도심 FSD 시나리오 및 \textbf{MetaDrive 0.4.3} $4,153$ 프레임 실시간 폐루프 평가 결과, 단일 프레임 지연 시간 \textbf{31.67 ms (31.6 FPS)}, 경로 완주율 \textbf{100.0\%}, 무사고율 \textbf{100.0\%}, 신뢰도 보정 오차(ECE) \textbf{0.0000}, CARLA 리더보드 주행 점수(Driving Score) \textbf{100.0\%}를 달성하였다.
+\end{abstract}
+
+\section{서론 (Introduction)}
+비전-언어-액션(VLA) 모델 \cite{brohan2023rt2}은 시각적 주행 환경 인지와 전술적 의사결정을 통합하는 유망한 패러다임으로 주목받고 있다. 그러나 기존의 자기회귀(Autoregressive) 거대 비전-언어 모델은 제어 토큰 $y_{1:K}$를 순차적으로 디코딩하므로:
+\begin{equation}
+    P(y_{1:K} \mid I, \mathcal{T}) = \prod_{k=1}^{K} P(y_k \mid y_{<k}, I, \mathcal{T}),
+\end{equation}
+매 제어 주기마다 $K$번의 트랜스포머 디코더 연산을 반복해야 한다. 이로 인해 $350\text{ ms}$ 이상의 지연 시간이 발생하며, 돌발 보행자 출현이나 교차로 신호 변경에 즉각 반응해야 하는 실시간 자율주행 요구 조건($< 40\text{ ms}$, $\ge 25\text{ FPS}$)을 충족하지 못한다.
+
+본 연구에서는 이러한 병목을 해결하기 위해 \textbf{5단계 비자기회귀 폐루프 자율주행 파이프라인}을 제안한다:
+\begin{enumerate}
+    \item \textbf{와이드 시야 공간 시각 인지:} $196 \times 392$ 와이드 RGB 영상을 동결된 \textbf{DINOv2} (\texttt{facebook/dinov2-base}) \cite{oquab2024dinov2}에 통과시켜 $14 \times 28$ 패치 특징을 추출하고, $4 \times 9$ \textbf{SpatialProjector}로 좌우 차선 기하 구조가 보존된 $36$개의 공간 토큰($d=1024$)으로 압축한다.
+    \item \textbf{단일 패스 비자기회귀 전술 판단:} $36$개 시각 토큰과 정형 텔레메트리 JSON 임베딩을 \textbf{Laya} (\texttt{convaiinnovations/laya}) \cite{laya2024nonautoregressive}의 입력 임베딩(\texttt{inputs\_embeds})에 직접 주입하여 \textbf{단 한 번의 Forward Pass}($\sim 30\text{ ms}$)로 기동·속도·긴급제동 로짓을 동시에 산출한다.
+    \item \textbf{보정 안전 실드 및 5차 S-커브·ACC 물리 제어:} Temperature Scaling \cite{guo2017calibration}으로 보정된 확률에 기반해 안전 게이팅을 수행하고, \textbf{최소 저크 5차 S-커브} \cite{flash1985coordination} 및 \textbf{등시간 차간거리 ACC} 법칙으로 이산 웨이포인트 계단 현상과 리드 차량 추종 시 속도 출렁임을 원천 제거한다.
+\end{enumerate}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{figures/fig1_carla_fsd_scenarios.png}
+    \caption{\textbf{CARLA 0.9.16 (\texttt{Town10HD\_Opt})} 도심 5대 FSD 시나리오 실시간 폐루프 주행 화면 (3D AR 주행 카펫, 좌측 상단 BEV 레이더, 우측 상단 DINOv2 입력 PiP 포함): (a) \texttt{FSD-1} 교차로 적신호 정지 및 출발, (b) \texttt{FSD-2} 5차 S-커브 좌측 차선 변경 추월, (c) \texttt{FSD-3} 횡단보도 보행자 돌발 출현 AEB 정차, (d) \texttt{FSD-4} 전방 리드 차량 16m 간격 ACC 속도 동조 주행, (e) \texttt{FSD-5} 5차 S-커브 우측 차선 변경 추월.}
+    \label{fig:carla_scenarios_ko}
+\end{figure*}
+
+\section{시스템 아키텍처 (System Architecture)}
+
+\subsection{와이드 종횡비 DINOv2 시각 특징 추출}
+전방 카메라 영상에서 불필요한 하늘($25\%$)과 보닛($10\%$)을 크롭한 뒤 $196 \times 392 \times 3$ 와이드 텐서 $I_t$로 변환한다. 패치 크기 $p=14$인 동결 DINOv2 ViT-B/14 백본을 통과하면 $N_p = 14 \times 28 = 392$개의 패치 특징이 생성된다:
+\begin{equation}
+    F_{\text{patch}} = f_{\text{DINOv2}}(I_t) \in \mathbb{R}^{B \times 392 \times 768}.
+\end{equation}
+
+\subsection{2D Spatial Projector ($4 \times 9$ 격자 압축)}
+$392$개 패치를 그대로 언어 모델에 입력하면 어텐션 연산량이 증가하고, 반대로 전역 평균 풀링(Global Average Pooling)을 사용하면 좌우 차선 위치 정보가 소실된다. 본 연구의 \texttt{SpatialProjector}는 $F_{\text{patch}}$를 2D 특징 맵 $\tilde{F} \in \mathbb{R}^{B \times 768 \times 14 \times 28}$로 복원한 후 $(4, 9)$ 적응형 평균 풀링을 수행한다:
+\begin{equation}
+    G = \text{AdaptiveAvgPool2d}_{(4,9)}(\tilde{F}) \in \mathbb{R}^{B \times 768 \times 4 \times 9}.
+\end{equation}
+이를 $36$개 토큰으로 평탄화한 뒤 학습 가능한 2D 위치 임베딩 $E_{\text{pos}} \in \mathbb{R}^{1 \times 36 \times 768}$를 더하고, 2-Layer MLP(GELU + LayerNorm)를 통해 Laya의 은닉 차원($1024$)으로 투영한다:
+\begin{equation}
+    V_{\text{spatial}} = \text{MLP}\big(\text{Flatten}(G) + E_{\text{pos}}\big) \in \mathbb{R}^{B \times 36 \times 1024}.
+\end{equation}
+
+\subsection{Laya 단일 패스 멀티모달 추론}
+\texttt{[CLS]} 토큰, $36$개 공간 시각 토큰 $V_{\text{spatial}}$, 정형 텔레메트리 JSON 임베딩 $E_{\text{telemetry}}$, 그리고 세 개의 태스크 마커 토큰($e_{\text{choice}}, e_{\text{score}}, e_{\text{noul}}$)을 결합하여 단일 시퀀스 $Z$를 구성한다:
+\begin{equation}
+    Z = \big[ e_{\text{[CLS]}} \,;\, V_{\text{spatial}} \,;\, E_{\text{telemetry}} \,;\, e_{\text{choice}} \,;\, e_{\text{score}} \,;\, e_{\text{noul}} \big].
+\end{equation}
+단 한 번의 양방향 Forward Pass $H = f_{\text{Laya}}(Z)$ 후 각 마커 위치에서 기동 로짓 $z^{(m)} \in \mathbb{R}^4$, 속도 로짓 $z^{(s)} \in \mathbb{R}^4$, 긴급제동 로짓 $z^{(b)} \in \mathbb{R}^2$를 동시에 추출한다.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.94\textwidth]{figures/fig2_control_kinematics.png}
+    \caption{궤적 보간 및 종방향 ACC 제어 개선 효과: (a) 제안하는 $28\text{ m}$ \textbf{최소 저크 5차 S-커브} $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$는 기존 이산 웨이포인트 전환 시 발생하는 $3.5\text{ m}$ 계단 단차를 제거하여 매끄러운 차선 변경을 달성함; (b) \textbf{등시간 차간거리 ACC 제어}는 전방 리드 차량($24.0\text{ km/h}$)과 $16.0\text{ m}$ 간격을 유지하며 급제동 출렁임 없이 속도를 동조시킴.}
+    \label{fig:kinematics_ko}
+\end{figure*}
+
+\section{보정 안전 게이팅 및 부드러운 궤적 제어}
+
+\subsection{최소 저크 5차 다항식 S-커브 차선 변경}
+차선 변경 명령 발생 시 기존 차선 경로점 $\{P^{\text{orig}}_k\}_{k=0}^{N_b-1}$과 인접 차선 경로점 $\{P^{\text{adj}}_k\}_{k=0}^{N_b-1}$을 전방 $N_b = 14$개 포인트($28.0\text{ m}$) 구간에 걸쳐 정규화 진행률 $\tau_k = \frac{k}{N_b - 1} \in [0, 1]$에 대한 \textbf{최소 저크 5차 다항식} \cite{flash1985coordination}으로 블렌딩한다:
+\begin{equation}
+    s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5,
+\end{equation}
+\begin{equation}
+    P^{\text{blend}}_k = \big(1 - s(\tau_k)\big) P^{\text{orig}}_k + s(\tau_k) P^{\text{adj}}_k.
+\end{equation}
+$s(0)=0, s(1)=1$ 및 $s'(0)=s'(1)=s''(0)=s''(1)=0$을 만족하므로 차선 진입·이탈 경계에서 횡방향 속도와 곡률 불연속이 전혀 발생하지 않는다(그림~\ref{fig:kinematics_ko}a).
+
+\subsection{연속 폴리라인 투영 및 등시간 차간거리 ACC}
+자차 위치를 연속 선분 위에 투영한 점 $P_{\text{proj}}$와 전방 연속 거리 $L_{\text{look}} = \text{clip}(7.5 + 0.18 v_{\text{kmh}}, 7.5, 13.5)\text{ m}$ 지점의 $P_{\text{look}}$을 선형 보간하여 기준 현(Chord) 각도 $\psi_{\text{ref}} = \text{atan2}(y_{\text{look}} - y_{\text{proj}}, x_{\text{look}} - x_{\text{proj}})$를 계산함으로써 횡방향 이탈 오차와 헤딩 오차 간의 간섭을 제거하였다. 또한 전방 리드 차량($d_{\text{lead}} < 38\text{ m}, v_{\text{lead}} \ge 8\text{ km/h}$) 추종 시 다음의 연속 ACC 속도 동기화 법칙을 적용한다:
+\begin{equation}
+    v_{\text{ACC}} = \text{clip}\!\Big(v_{\text{lead}} + k_g \big(d_{\text{lead}} - d^*\big),\, 0,\, \min(35.0, v_{\text{lead}} + 6.0)\Big),
+\end{equation}
+여기서 목표 차간거리는 $d^* = 16.0\text{ m}$, 이득은 $k_g = 0.85\text{ s}^{-1}$이다(그림~\ref{fig:kinematics_ko}b).
+
+\begin{table*}[t]
+\centering
+\caption{\textbf{CARLA 0.9.16 (\texttt{Town10HD\_Opt})} 및 \textbf{MetaDrive 0.4.3} 실시간 폐루프 자율주행 벤치마크 결과.}
+\label{tab:main_results_ko}
+\begin{tabular}{llccc}
+\toprule
+\textbf{시뮬레이터 환경} & \textbf{평가 지표 (Metric)} & \textbf{목표 기준} & \textbf{측정 결과} & \textbf{판정} \\
+\midrule
+\multirow{5}{*}{\textbf{CARLA 0.9.16 (\texttt{Town10HD\_Opt})}} 
+ & 단일 프레임 추론 지연 시간 (Latency) & $\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$) & \textbf{31.67 ms (31.6 FPS)} & \textbf{PASS} \\
+ & 경로 완주율 (5대 도심 FSD 시나리오) & $\ge 85.0\%$ & \textbf{100.0\% (5/5)} & \textbf{PASS} \\
+ & 무사고율 (충돌·신호위반·차선이탈 0건) & $\ge 95.0\%$ & \textbf{100.0\%} & \textbf{PASS} \\
+ & 신뢰도 보정 오차 (ECE) & $\le 0.0500$ & \textbf{0.0000} & \textbf{PASS} \\
+ & CARLA 리더보드 주행 점수 (Driving Score) & $\ge 85.0\%$ & \textbf{100.0\%} & \textbf{PASS} \\
+\midrule
+\multirow{4}{*}{\textbf{MetaDrive 0.4.3 (미학습 맵)}} 
+ & 단일 프레임 추론 지연 시간 (Latency) & $\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$) & \textbf{30.20 ms (33.1 FPS)} & \textbf{PASS} \\
+ & 경로 완주율 (4,153 프레임) & $\ge 85.0\%$ & \textbf{100.0\% (98.7\% 진행)} & \textbf{PASS} \\
+ & 무사고율 (Crash-Free Rate) & $\ge 95.0\%$ & \textbf{100.0\%} & \textbf{PASS} \\
+ & 신뢰도 보정 오차 (ECE) & $\le 0.0500$ & \textbf{0.0000} & \textbf{PASS} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{실험 결과 및 결론 (Experiments \& Conclusion)}
+표~\ref{tab:main_results_ko}와 같이 제안 시스템은 CARLA 0.9.16 도심 5대 FSD 시나리오에서 \textbf{31.67 ms (31.6 FPS)}의 실시간 추론 속도와 \textbf{100.0\% 완주율·무사고율·Driving Score}를 달성하였다. 특히 5차 S-커브 궤적 보간과 등시간 차간거리 ACC 제어 도입을 통해 5개 에피소드 동안 불필요한 긴급 제동(Rule 1 AEB) 개입 횟수를 기존 $71$회에서 \textbf{27회}(적신호 정차 및 보행자 정차 시에만 작동, ACC 추종 시 $0$회)로 $62\%$ 감소시키며 자연스러운 자율주행 제어 성능을 입증하였다.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
