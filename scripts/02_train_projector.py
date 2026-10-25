@@ -213,20 +213,35 @@ def main() -> None:
     system.dino.freeze()
     system.laya.freeze_brain()
 
+    # Unfreeze linear readout heads & trajectory head on LayaPilot while keeping 421M transformer layers frozen
+    for head_mod in (
+        system.laya.maneuver_head,
+        system.laya.speed_head,
+        system.laya.aeb_head,
+        system.laya.trajectory_head,
+    ):
+        for p in head_mod.parameters():
+            p.requires_grad = True
+
     trainable_params = [
         p
         for p in list(system.projector.parameters())
+        + list(system.laya.maneuver_head.parameters())
+        + list(system.laya.speed_head.parameters())
+        + list(system.laya.aeb_head.parameters())
         + list(system.laya.trajectory_head.parameters())
         if p.requires_grad
     ]
-    num_trainable = system.projector.count_trainable_parameters()
+    num_trainable = sum(p.numel() for p in trainable_params)
+    num_core = system.projector.count_trainable_parameters()
     total_frozen = sum(
         p.numel() for p in system.parameters() if not p.requires_grad
     )
 
     print(
         f"[02_train_projector] Device: {device} | Mock: {use_mock}\n"
-        f"  Trainable SpatialProjector params : {num_trainable:,} (~{num_trainable/1e6:.2f}M)\n"
+        f"  Trainable Core Spatial MLP params : {num_core:,} (~{num_core/1e6:.2f}M)\n"
+        f"  Trainable Total Adapter+Heads     : {num_trainable:,} (~{num_trainable/1e6:.2f}M)\n"
         f"  Frozen DINOv2 + Laya params       : {total_frozen:,}"
     )
 

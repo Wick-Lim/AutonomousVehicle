@@ -186,8 +186,24 @@ def main() -> None:
         "--ablation-mode",
         type=str,
         default="full",
-        choices=["full", "rule_only", "heuristic_fsm", "autoregressive_vla", "model_only"],
-        help="Ablation mode: 'full', 'rule_only', 'heuristic_fsm', 'autoregressive_vla', or 'model_only'.",
+        choices=[
+            "full",
+            "mlp_head",
+            "no_temporal",
+            "expert_rule_policy",
+            "rule_only",
+            "heuristic_fsm",
+            "ar_delay_300ms",
+            "autoregressive_vla",
+            "model_only",
+        ],
+        help="Ablation mode for decision/architecture/latency comparison.",
+    )
+    parser.add_argument(
+        "--route-length-m",
+        type=float,
+        default=None,
+        help="Override target route distance per episode in meters (e.g., 68.0 or 200.0).",
     )
     parser.add_argument(
         "--perception-mode",
@@ -255,7 +271,11 @@ def main() -> None:
             f"T_m={temps['t_maneuver']:.3f}, T_s={temps['t_speed']:.3f}, T_aeb={temps['t_aeb']:.3f}"
         )
 
-    system.eval()
+    if args.route_length_m is not None:
+        cfg.setdefault("env", {})["carla_route_length_m"] = float(args.route_length_m)
+    if args.ablation_mode == "no_temporal":
+        with torch.no_grad():
+            system.projector.temporal_gate.fill_(0.0)
     controller = SafetyShieldPID(config=cfg, use_mock=use_mock)
     labeler = ExpertLabeler()
     env = create_driving_env(
@@ -367,6 +387,19 @@ def main() -> None:
             all_s_targets.append(gt_label.speed_level)
             all_a_targets.append(gt_label.emergency_brake)
 
+            ctrl_telemetry = dict(telemetry)
+            if args.perception_mode == "vision_estimated" and aux_p:
+                # Replace simulator GT perception fields with AuxiliaryPerceptionHead visual estimates
+                ctrl_telemetry["lead_distance_m"] = float(aux_p["pred_lead_distance_m"][0].item())
+                ctrl_telemetry["lane_offset_m"] = float(aux_p["pred_lane_offset_m"][0].item())
+                tl_idx = int(aux_p["pred_traffic_light_idx"][0].item())
+                hz_idx = int(aux_p["pred_hazard_idx"][0].item())
+                ctrl_telemetry["traffic_light"] = ("green", "yellow", "red")[min(2, max(0, tl_idx))]
+                ctrl_telemetry["hazard_source"] = ("none", "vehicle", "pedestrian", "red_light")[min(3, max(0, hz_idx))]
+                bs_p = aux_p["pred_blindspot_probs"][0]
+                ctrl_telemetry["blind_spot_left"] = bool(float(bs_p[0].item()) >= 0.5)
+                ctrl_telemetry["blind_spot_right"] = bool(float(bs_p[1].item()) >= 0.5)
+
             if args.ablation_mode == "rule_only":
                 # Rule-Only Baseline: bypass DINOv2 + SpatialProjector + Laya tactical brain
                 decision = {
@@ -378,14 +411,44 @@ def main() -> None:
                     "emergency_brake": 0.0,
                     "predicted_trajectory": [],
                 }
+            elif args.ablation_mode == "expert_rule_policy":
+                # Direct execution of ExpertLabeler deterministic rules on ctrl_telemetry (without simulator oracle)
+                no_oracle_info = {k: v for k, v in info.items() if k != "expert_maneuver"}
+                no_oracle_tel = {k: v for k, v in ctrl_telemetry.items() if k != "expert_maneuver"}
+                rule_lbl = labeler.label_step(no_oracle_tel, (0.0, 0.0), no_oracle_info)
+                decision = {
+                    "maneuver": rule_lbl.maneuver,
+                    "maneuver_idx": rule_lbl.maneuver_idx,
+                    "maneuver_confidence": 1.0,
+                    "speed_level": rule_lbl.speed_level,
+                    "speed_confidence": 1.0,
+                    "emergency_brake": float(rule_lbl.emergency_brake),
+                    "predicted_trajectory": [],
+                }
+            elif args.ablation_mode == "mlp_head":
+                # DINOv2 + SpatialProjector + 2-Layer MLP Readout (bypassing 421M Laya cross-attention)
+                vt_mean = out["visual_tokens"][0].mean(dim=0)
+                mlp_m_logits = system.laya.maneuver_head(vt_mean)
+                mlp_s_logits = system.laya.speed_head(vt_mean)
+                mlp_m_idx = int(mlp_m_logits.argmax(dim=-1).item())
+                mlp_s_lvl = int(mlp_s_logits.argmax(dim=-1).item())
+                decision = {
+                    "maneuver": ("keep_lane", "change_left", "change_right", "follow_lead")[mlp_m_idx],
+                    "maneuver_idx": mlp_m_idx,
+                    "maneuver_confidence": 0.85,
+                    "speed_level": mlp_s_lvl,
+                    "speed_confidence": 0.85,
+                    "emergency_brake": aeb_prob,
+                    "predicted_trajectory": [],
+                }
             elif args.ablation_mode == "heuristic_fsm":
                 # Strong Rule-Based FSM with Obstacle Overtake (changes lane when lead_dist <= 28m & slow)
-                d_l = float(telemetry.get("lead_distance_m", 60.0))
-                v_l = float(telemetry.get("lead_speed_kmh", 60.0))
+                d_l = float(ctrl_telemetry.get("lead_distance_m", 60.0))
+                v_l = float(ctrl_telemetry.get("lead_speed_kmh", 60.0))
                 if d_l <= 28.0 and v_l < 12.0:
-                    if bool(telemetry.get("left_lane_available", False)):
+                    if bool(ctrl_telemetry.get("left_lane_available", False)):
                         fsm_man, fsm_idx = "change_left", 1
-                    elif bool(telemetry.get("right_lane_available", False)):
+                    elif bool(ctrl_telemetry.get("right_lane_available", False)):
                         fsm_man, fsm_idx = "change_right", 2
                     else:
                         fsm_man, fsm_idx = "keep_lane", 0
@@ -415,25 +478,12 @@ def main() -> None:
                         for p in pred_traj
                     ],
                 }
-                if args.ablation_mode == "autoregressive_vla":
-                    # Simulate 300ms (6 frames at 20Hz) sequential token-decoding lag
+                if args.ablation_mode in ("autoregressive_vla", "ar_delay_300ms"):
+                    # Inject 300ms (6 synchronous frames at 20Hz) action-decoding delay into the same policy
                     ar_decision_queue.append(raw_decision)
                     decision = ar_decision_queue[max(0, len(ar_decision_queue) - 7)]
                 else:
                     decision = raw_decision
-
-            ctrl_telemetry = dict(telemetry)
-            if args.perception_mode == "vision_estimated" and aux_p:
-                # Replace simulator GT perception fields with AuxiliaryPerceptionHead visual estimates
-                ctrl_telemetry["lead_distance_m"] = float(aux_p["pred_lead_distance_m"][0].item())
-                ctrl_telemetry["lane_offset_m"] = float(aux_p["pred_lane_offset_m"][0].item())
-                tl_idx = int(aux_p["pred_traffic_light_idx"][0].item())
-                hz_idx = int(aux_p["pred_hazard_idx"][0].item())
-                ctrl_telemetry["traffic_light"] = ("green", "yellow", "red")[min(2, max(0, tl_idx))]
-                ctrl_telemetry["hazard_source"] = ("none", "vehicle", "pedestrian", "red_light")[min(3, max(0, hz_idx))]
-                bs_p = aux_p["pred_blindspot_probs"][0]
-                ctrl_telemetry["blind_spot_left"] = bool(float(bs_p[0].item()) >= 0.5)
-                ctrl_telemetry["blind_spot_right"] = bool(float(bs_p[1].item()) >= 0.5)
 
             shield_enabled = bool(args.shield_mode == "on" and args.ablation_mode != "model_only")
 
