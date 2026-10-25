@@ -284,12 +284,20 @@ class CarlaWrapper:
                 pass
             self._scenario_actor = None
 
-        for npc in self._npc_actors:
+        self._npc_actors.clear()
+
+        # Sweep all vehicles or walkers in the persistent CARLA world
+        if self._world is not None:
             try:
-                npc.destroy()
+                for actor in self._world.get_actors():
+                    t_id = str(getattr(actor, "type_id", ""))
+                    if t_id.startswith("vehicle.") or t_id.startswith("walker.pedestrian."):
+                        try:
+                            actor.destroy()
+                        except Exception:
+                            pass
             except Exception:
                 pass
-        self._npc_actors.clear()
 
         for q in (self._image_queue, self._hd_image_queue):
             while not q.empty():
@@ -321,7 +329,7 @@ class CarlaWrapper:
             pass
 
     def _switch_route_to_adjacent_lane(self, direction: str) -> bool:
-        """Switch remaining route waypoints to adjacent same-direction lane ('left' or 'right')."""
+        """Switch remaining route waypoints to adjacent same-direction lane ('left' or 'right') with linear offset ramp."""
         if not getattr(self, "_route_waypoints", None) or self._carla_mod is None:
             return False
         carla = self._carla_mod
@@ -363,6 +371,7 @@ class CarlaWrapper:
         self._fsd_event_resolved = False
         self._fsd_stop_hold_steps = 0
         self._fsd_lane_changed = False
+        self._lane_change_ramp_m = 0.0
 
         scenario_idx = int(abs(seed - 5000)) % len(FSD_SCENARIO_NAMES)
         self._fsd_scenario_name = FSD_SCENARIO_NAMES[scenario_idx]
@@ -865,7 +874,9 @@ class CarlaWrapper:
         right_vec_x = -math.sin(curr_yaw)
         right_vec_y = math.cos(curr_yaw)
         lat_right = dx_wp * right_vec_x + dy_wp * right_vec_y
-        lane_offset_m = float(np.clip(-lat_right, -self.lane_width * 0.85, self.lane_width * 0.85))
+        lane_offset_m = float(
+            np.clip(-lat_right, -self.lane_width * 0.85, self.lane_width * 0.85)
+        )
 
         # Heading error toward lookahead waypoint (+ = pointing left of lane tangent, matching +steering = steer left)
         target_yaw = math.atan2(
@@ -976,7 +987,7 @@ class CarlaWrapper:
         ):
             obs_loc = self._scenario_actor.get_location()
             d_obs = math.hypot(float(obs_loc.x - loc.x), float(obs_loc.y - loc.y))
-            if d_obs <= 27.0:
+            if d_obs <= 30.0:
                 exp_man = "change_left"
                 nav_command = "turn_left"
                 lead_distance_m = 22.0
@@ -992,7 +1003,7 @@ class CarlaWrapper:
         ):
             obs_loc = self._scenario_actor.get_location()
             d_obs = math.hypot(float(obs_loc.x - loc.x), float(obs_loc.y - loc.y))
-            if d_obs <= 27.0:
+            if d_obs <= 30.0:
                 exp_man = "change_right"
                 nav_command = "turn_right"
                 lead_distance_m = 22.0
@@ -1524,6 +1535,22 @@ class CarlaWrapper:
         """Clean up CARLA actors and restore asynchronous world settings."""
         if self._world is not None:
             try:
+                for s in (self._camera_sensor, self._hd_camera_sensor, self._collision_sensor):
+                    if s is not None:
+                        s.stop()
+            except Exception:
+                pass
+            try:
+                for actor in self._world.get_actors():
+                    t_id = str(getattr(actor, "type_id", ""))
+                    if t_id.startswith("vehicle.") or t_id.startswith("walker.pedestrian."):
+                        try:
+                            actor.destroy()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            try:
                 if self._traffic_manager is not None:
                     self._traffic_manager.set_synchronous_mode(False)
             except Exception:
@@ -1535,5 +1562,4 @@ class CarlaWrapper:
                 self._world.apply_settings(settings)
             except Exception:
                 pass
-            self._cleanup_carla_actors()
             self._world = None

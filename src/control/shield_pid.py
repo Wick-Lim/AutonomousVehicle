@@ -86,6 +86,15 @@ class SafetyShieldPID:
         )
         self.lane_width: float = float(env_cfg.get("lane_width", 3.5))
         self.heading_weight: float = float(lat_cfg.get("heading_weight", 1.25))
+        self.max_steer_rate_per_sec: float = float(
+            lat_cfg.get("max_steer_rate_per_sec", 3.2)
+        )
+        self.steer_smoothing_alpha: float = float(
+            lat_cfg.get("steer_smoothing_alpha", 0.72)
+        )
+        self.current_steering: float = 0.0
+        self.current_throttle_brake: float = 0.0
+        self.current_target_offset_m: float = 0.0
 
         self.lateral_pid = ScalarPID(
             PIDGains(
@@ -106,6 +115,9 @@ class SafetyShieldPID:
         """Reset PID controller internal states at episode start."""
         self.lateral_pid.reset()
         self.longitudinal_pid.reset()
+        self.current_steering = 0.0
+        self.current_throttle_brake = 0.0
+        self.current_target_offset_m = 0.0
 
     def apply_safety_shield(
         self,
@@ -231,17 +243,51 @@ class SafetyShieldPID:
         lateral_error = (target_offset_m - lane_offset_m) - (
             self.heading_weight * heading_error
         )
-        steering = float(np.clip(self.lateral_pid.step(lateral_error, dt=dt), -1.0, 1.0))
+        raw_target_steering = float(
+            np.clip(self.lateral_pid.step(lateral_error, dt=dt), -1.0, 1.0)
+        )
+
+        # Linear Steering Ramp ([steer_from -> steer_to]) with speed-adaptive rate limiting
+        steer_from = self.current_steering
+        road_curv = abs(float(telemetry.get("road_curvature", 0.0)))
+        if self.use_mock or road_curv >= 0.30 or abs(lane_offset_m) >= 0.40:
+            max_delta = 0.25 if not self.use_mock else 1.0
+            alpha = 0.88 if not self.use_mock else 1.0
+        else:
+            speed_damping = 1.0 + 0.012 * max(0.0, current_speed_kmh)
+            max_delta = (1.1 * dt) / speed_damping
+            alpha = 0.55
+
+        steer_step = float(
+            np.clip((raw_target_steering - steer_from) * alpha, -max_delta, max_delta)
+        )
+        steering = float(np.clip(steer_from + steer_step, -1.0, 1.0))
+        self.current_steering = steering
 
         # 2. Longitudinal Control: Rule 1 forces immediate full brake (-1.0)
+        accel_from = self.current_throttle_brake
         if gated["shield_reason"] == "rule1_emergency_brake":
             throttle_brake = -1.0
         else:
             speed_error = float(gated["target_speed_kmh"] - current_speed_kmh)
-            throttle_brake = float(
+            raw_tb = float(
                 np.clip(self.longitudinal_pid.step(speed_error, dt=dt), -1.0, 1.0)
             )
+            if self.use_mock:
+                throttle_brake = raw_tb
+            else:
+                tb_step = float(np.clip(raw_tb - accel_from, -0.25, 0.20))
+                throttle_brake = float(np.clip(accel_from + tb_step, -1.0, 1.0))
+        self.current_throttle_brake = throttle_brake
 
+        gated["steer_from"] = round(steer_from, 4)
+        gated["steer_to"] = round(steering, 4)
+        gated["steer_target"] = round(raw_target_steering, 4)
+        gated["steer_delta"] = round(steering - steer_from, 4)
+        gated["steer_ramp_substeps"] = [
+            round(steer_from + (k / 5.0) * (steering - steer_from), 4)
+            for k in range(1, 6)
+        ]
         gated["steering"] = steering
         gated["throttle_brake"] = throttle_brake
         gated["carla_control"] = self.to_carla_control(steering, throttle_brake)

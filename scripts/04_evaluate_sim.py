@@ -125,12 +125,14 @@ def render_hud_frame(
         cv2.LINE_AA,
     )
 
-    # Row 3: Physical PID Actuation & Environment State
+    # Row 3: Physical PID Actuation (Linear Steering Transition [steer_from -> steer_to]) & Environment State
     steer, tb = float(control_action[0]), float(control_action[1])
+    s_from = float(gated_info.get("steer_from", steer))
+    s_to = float(gated_info.get("steer_to", steer))
     cv2.putText(
         panel,
-        f"PID Control -> Steer: {steer:+5.2f} | Throttle/Brake: {tb:+5.2f} | "
-        f"Lead Dist: {lead_d:4.1f}m | Offset: {offset:+4.2f}m | Light: {tl}",
+        f"Linear Steer: {s_from:+5.2f} -> {s_to:+5.2f} | Pedal: {tb:+5.2f} | "
+        f"Lead: {lead_d:4.1f}m | Offset: {offset:+4.2f}m | Light: {tl}",
         (14, 114),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.50,
