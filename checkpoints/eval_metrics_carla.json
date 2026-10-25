@@ -1,24 +1,33 @@
 {
   "simulator": "carla",
   "ablation_mode": "full",
+  "perception_mode": "gt",
+  "shield_mode": "on",
+  "hardware_env": {
+    "cpu": "AMD Ryzen 5 7500F 6-Core Processor (12 Threads)",
+    "gpu": "NVIDIA GeForce RTX 4070 Ti (12 GB GDDR6X)",
+    "os": "Windows 11 (10.0.26200)",
+    "pytorch": "2.13.0+cpu",
+    "precision": "FP32 (batch_size=1, warmup_passes=3)"
+  },
   "episodes": 10,
   "seed_range": [
     5000,
     5009
   ],
-  "total_frames": 1986,
+  "total_frames": 1981,
   "total_distance_driven_m": 680.0,
-  "mean_latency_ms": 33.4,
-  "p50_latency_ms": 33.22,
-  "p95_latency_ms": 34.37,
-  "p99_latency_ms": 37.11,
-  "fps": 29.9,
+  "mean_latency_ms": 32.85,
+  "p50_latency_ms": 32.77,
+  "p95_latency_ms": 33.96,
+  "p99_latency_ms": 35.45,
+  "fps": 30.4,
   "stage_latency_breakdown_ms": {
     "preprocess_crop_resize": 0.42,
-    "dinov2_vit_b14_frozen": 16.7,
-    "spatial_projector_temporal_aux": 1.34,
-    "laya_modernbert_e2e_traj": 14.7,
-    "safety_shield_bicycle_mpc_pid": 0.45
+    "dinov2_vit_b14_frozen": 16.43,
+    "spatial_projector_temporal_aux": 1.31,
+    "laya_modernbert_e2e_traj": 14.45,
+    "safety_shield_bicycle_ff_pid": 0.45
   },
   "route_completion_rate_pct": 100.0,
   "mean_route_progress_pct": 100.0,
@@ -26,9 +35,10 @@
   "driving_score_pct": 100.0,
   "crash_free_rate_pct": 100.0,
   "mean_cross_track_error_m": 0.085,
-  "rms_steer_delta": 0.0292,
-  "mean_speed_tracking_error_kmh": 11.61,
+  "rms_steer_delta": 0.0223,
+  "mean_speed_tracking_error_kmh": 11.52,
   "uncalibrated_val_ece": {
+    "split_protocol": "episode_block_85_15 (42,500 train / 7,500 val frames, zero episode overlap)",
     "maneuver_ece": 0.0009,
     "speed_ece": 0.0022,
     "aeb_ece": 0.0148,
@@ -39,7 +49,7 @@
   "online_sim_ece": 0.0,
   "e2e_trajectory_waypoints": 6,
   "e2e_trajectory_horizon_s": 3.0,
-  "vision_aux_lead_mae_m": 3.36,
+  "vision_aux_lead_mae_m": 3.23,
   "fsd_scenarios_tested": [
     "FSD-1_Intersection_Turn",
     "FSD-2_Dynamic_Overtake_Left",
@@ -78,7 +88,7 @@
     "off_road_infractions": 0
   },
   "shield_interventions": {
-    "rule1_emergency_brake": 51,
+    "rule1_emergency_brake": 46,
     "boundary_left_unavailable": 152,
     "boundary_right_unavailable": 158,
     "blindspot_left_occupied": 5

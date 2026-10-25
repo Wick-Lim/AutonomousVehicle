@@ -123,6 +123,7 @@ class SafetyShieldPID:
         self,
         decision: Dict[str, Any],
         telemetry: Dict[str, Any],
+        shield_enabled: bool = True,
     ) -> Dict[str, Any]:
         """Apply calibrated safety gating rules to Laya's raw decision output."""
         raw_maneuver = str(decision.get("maneuver", "keep_lane"))
@@ -139,6 +140,34 @@ class SafetyShieldPID:
         gated_speed_level = raw_speed_level
         shield_triggered = False
         shield_reason = "none"
+
+        if not shield_enabled:
+            # Model-Only Mode (Safety Shield OFF): only Laya's predicted AEB probability triggers emergency brake
+            if aeb_prob >= self.aeb_threshold:
+                gated_maneuver = "keep_lane"
+                gated_speed_level = 0
+                shield_triggered = True
+                shield_reason = "model_aeb_only"
+            target_speed_kmh = SPEED_LEVEL_KMH.get(gated_speed_level, 20.0)
+            if lead_distance_m < 38.0 and gated_speed_level > 0 and lead_speed_kmh >= 8.0 and not self.use_mock:
+                desired_gap_m = 8.0 + 1.2 * (current_speed_kmh / 3.6)
+                gap_error_m = lead_distance_m - desired_gap_m
+                acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
+                target_speed_kmh = float(np.clip(lead_speed_kmh + 0.85 * gap_error_m, 0.0, acc_upper_kmh))
+            return {
+                "raw_maneuver": raw_maneuver,
+                "raw_speed_level": raw_speed_level,
+                "maneuver": gated_maneuver,
+                "speed_level": gated_speed_level,
+                "target_speed_kmh": target_speed_kmh,
+                "mpc_cornering_cap_kmh": 65.0,
+                "maneuver_confidence": maneuver_conf,
+                "emergency_brake": aeb_prob,
+                "shield_triggered": shield_triggered,
+                "shield_reason": shield_reason,
+                "blind_spot_left": bool(telemetry.get("blind_spot_left", False)),
+                "blind_spot_right": bool(telemetry.get("blind_spot_right", False)),
+            }
 
         # Rule 1: Emergency Brake Priority (emergency_brake >= 0.70, CARLA red light/pedestrian, or physical TTC hazard)
         if (
@@ -279,9 +308,10 @@ class SafetyShieldPID:
         decision: Dict[str, Any],
         telemetry: Dict[str, Any],
         dt: float = 0.05,
+        shield_enabled: bool = True,
     ) -> Tuple[Tuple[float, float], Dict[str, Any]]:
         """Compute physical control [steering, throttle_brake] in [-1.0, 1.0]."""
-        gated = self.apply_safety_shield(decision, telemetry)
+        gated = self.apply_safety_shield(decision, telemetry, shield_enabled=shield_enabled)
 
         current_speed_kmh = float(telemetry.get("speed_kmh", 0.0))
         lane_offset_m = float(telemetry.get("lane_offset_m", 0.0))
@@ -318,9 +348,14 @@ class SafetyShieldPID:
         # Linear Steering Ramp ([steer_from -> steer_to]) with speed-adaptive rate limiting
         steer_from = self.current_steering
         road_curv = abs(float(telemetry.get("road_curvature", 0.0)))
-        if self.use_mock or road_curv >= 0.30 or abs(lane_offset_m) >= 0.40:
-            max_delta = 0.25 if not self.use_mock else 1.0
-            alpha = 0.88 if not self.use_mock else 1.0
+        if self.use_mock:
+            max_delta = 1.0
+            alpha = 1.0
+        elif road_curv >= 0.35:
+            # Allow slightly faster steering response on tight highway ramps in MetaDrive
+            speed_damping = 1.0 + 0.012 * max(0.0, current_speed_kmh)
+            max_delta = min(0.22, 3.5 * (1.1 * dt) / speed_damping)
+            alpha = 0.82
         else:
             speed_damping = 1.0 + 0.012 * max(0.0, current_speed_kmh)
             max_delta = (1.1 * dt) / speed_damping
@@ -332,9 +367,9 @@ class SafetyShieldPID:
         steering = float(np.clip(steer_from + steer_step, -1.0, 1.0))
         self.current_steering = steering
 
-        # 2. Longitudinal Control: Rule 1 forces immediate full brake (-1.0)
+        # 2. Longitudinal Control: Rule 1 or Model AEB forces immediate full brake (-1.0)
         accel_from = self.current_throttle_brake
-        if gated["shield_reason"] == "rule1_emergency_brake":
+        if gated["shield_reason"] in ("rule1_emergency_brake", "model_aeb_only"):
             throttle_brake = -1.0
         else:
             speed_error = float(gated["target_speed_kmh"] - current_speed_kmh)

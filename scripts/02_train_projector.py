@@ -32,6 +32,61 @@ def resolve_device(cfg_device: str) -> torch.device:
     return torch.device(cfg_device)
 
 
+def compute_aux_and_traj_losses(
+    out: Dict[str, Any],
+    telemetries: list[Dict[str, Any]],
+    target_traj: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute Smooth-L1 6-waypoint trajectory loss L_traj and auxiliary perception loss L_aux."""
+    pred_traj = out["predicted_trajectory"]
+    loss_traj = F.smooth_l1_loss(pred_traj, target_traj.to(device))
+
+    aux = out.get("aux_perception", {})
+    if not aux:
+        return loss_traj, torch.tensor(0.0, device=device)
+
+    tl_map = {"green": 0, "yellow": 1, "red": 2}
+    haz_map = {"none": 0, "vehicle": 1, "pedestrian": 2, "red_light": 3}
+    gt_lead = torch.tensor(
+        [float(t.get("lead_distance_m", 60.0)) for t in telemetries],
+        dtype=torch.float32,
+        device=device,
+    )
+    gt_off = torch.tensor(
+        [float(t.get("lane_offset_m", 0.0)) for t in telemetries],
+        dtype=torch.float32,
+        device=device,
+    )
+    gt_tl = torch.tensor(
+        [tl_map.get(str(t.get("traffic_light", "green")).lower(), 0) for t in telemetries],
+        dtype=torch.long,
+        device=device,
+    )
+    gt_haz = torch.tensor(
+        [haz_map.get(str(t.get("hazard_source", "none")).lower(), 0) for t in telemetries],
+        dtype=torch.long,
+        device=device,
+    )
+    gt_bs = torch.tensor(
+        [
+            [float(bool(t.get("blind_spot_left", False))), float(bool(t.get("blind_spot_right", False)))]
+            for t in telemetries
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    loss_aux = (
+        0.05 * F.smooth_l1_loss(aux["pred_lead_distance_m"], gt_lead)
+        + F.smooth_l1_loss(aux["pred_lane_offset_m"], gt_off)
+        + 0.5 * F.cross_entropy(aux["traffic_light_logits"], gt_tl)
+        + 0.5 * F.cross_entropy(aux["hazard_logits"], gt_haz)
+        + 0.5 * F.binary_cross_entropy_with_logits(aux["blind_spot_logits"], gt_bs)
+    )
+    return loss_traj, loss_aux
+
+
 def evaluate(
     system: AutonomousDrivingSystem,
     val_loader: torch.utils.data.DataLoader,
@@ -40,6 +95,7 @@ def evaluate(
 ) -> Dict[str, float]:
     system.eval()
     total_loss = 0.0
+    total_traj_mae = 0.0
     correct_m = 0
     correct_s = 0
     correct_a = 0
@@ -48,6 +104,8 @@ def evaluate(
     w_m = float(loss_weights.get("maneuver", 1.0))
     w_s = float(loss_weights.get("speed_level", 1.0))
     w_a = float(loss_weights.get("emergency_brake", 2.0))
+    w_traj = float(loss_weights.get("trajectory", 0.5))
+    w_aux = float(loss_weights.get("aux_perception", 0.2))
 
     with torch.no_grad():
         for batch in val_loader:
@@ -56,6 +114,7 @@ def evaluate(
             target_m = batch["maneuver_idx"].to(device)
             target_s = batch["speed_level"].to(device)
             target_a = batch["emergency_brake"].to(device)
+            target_traj = batch["target_trajectory"].to(device)
 
             out = system(images, telemetries)
             loss_m = F.cross_entropy(out["maneuver_logits"], target_m)
@@ -63,10 +122,20 @@ def evaluate(
             loss_a = F.binary_cross_entropy_with_logits(
                 out["aeb_logits"].squeeze(-1), target_a
             )
-            loss = w_m * loss_m + w_s * loss_s + w_a * loss_a
+            loss_traj, loss_aux = compute_aux_and_traj_losses(
+                out, telemetries, target_traj, device
+            )
+            loss = (
+                w_m * loss_m
+                + w_s * loss_s
+                + w_a * loss_a
+                + w_traj * loss_traj
+                + w_aux * loss_aux
+            )
 
             bsz = images.size(0)
             total_loss += float(loss.item()) * bsz
+            total_traj_mae += float((out["predicted_trajectory"] - target_traj).abs().mean().item()) * bsz
             correct_m += int((out["maneuver_idx"] == target_m).sum().item())
             correct_s += int((out["speed_level"] == target_s).sum().item())
             pred_a = (out["emergency_brake"] >= 0.5).long()
@@ -76,6 +145,7 @@ def evaluate(
     denom = max(1, total_samples)
     return {
         "val_loss": total_loss / denom,
+        "traj_mae": total_traj_mae / denom,
         "maneuver_acc": correct_m / denom,
         "speed_acc": correct_s / denom,
         "aeb_acc": correct_a / denom,
@@ -143,7 +213,12 @@ def main() -> None:
     system.dino.freeze()
     system.laya.freeze_brain()
 
-    trainable_params = [p for p in system.projector.parameters() if p.requires_grad]
+    trainable_params = [
+        p
+        for p in list(system.projector.parameters())
+        + list(system.laya.trajectory_head.parameters())
+        if p.requires_grad
+    ]
     num_trainable = system.projector.count_trainable_parameters()
     total_frozen = sum(
         p.numel() for p in system.parameters() if not p.requires_grad
@@ -165,11 +240,14 @@ def main() -> None:
     w_m = float(loss_weights.get("maneuver", 1.0))
     w_s = float(loss_weights.get("speed_level", 1.0))
     w_a = float(loss_weights.get("emergency_brake", 2.0))
+    w_traj = float(loss_weights.get("trajectory", 0.5))
+    w_aux = float(loss_weights.get("aux_perception", 0.2))
 
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
         system.projector.train()
+        system.laya.trajectory_head.train()
         running_loss = 0.0
         n_seen = 0
 
@@ -181,6 +259,7 @@ def main() -> None:
             target_m = batch["maneuver_idx"].to(device)
             target_s = batch["speed_level"].to(device)
             target_a = batch["emergency_brake"].to(device)
+            target_traj = batch["target_trajectory"].to(device)
 
             optimizer.zero_grad()
             out = system(images, telemetries)
@@ -190,7 +269,16 @@ def main() -> None:
             loss_a = F.binary_cross_entropy_with_logits(
                 out["aeb_logits"].squeeze(-1), target_a
             )
-            loss = w_m * loss_m + w_s * loss_s + w_a * loss_a
+            loss_traj, loss_aux = compute_aux_and_traj_losses(
+                out, telemetries, target_traj, device
+            )
+            loss = (
+                w_m * loss_m
+                + w_s * loss_s
+                + w_a * loss_a
+                + w_traj * loss_traj
+                + w_aux * loss_aux
+            )
 
             loss.backward()
             nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
@@ -207,6 +295,7 @@ def main() -> None:
         print(
             f"Epoch {epoch:02d}/{epochs:02d} | "
             f"train_loss={train_loss:.4f} | val_loss={val_metrics['val_loss']:.4f} | "
+            f"traj_mae={val_metrics['traj_mae']:.3f}m | "
             f"maneuver_acc={val_metrics['maneuver_acc']*100:.1f}% | "
             f"speed_acc={val_metrics['speed_acc']*100:.1f}% | "
             f"aeb_acc={val_metrics['aeb_acc']*100:.1f}%"
@@ -218,6 +307,7 @@ def main() -> None:
                 {
                     "epoch": epoch,
                     "projector_state_dict": system.projector.state_dict(),
+                    "trajectory_head_state_dict": system.laya.trajectory_head.state_dict(),
                     "val_metrics": val_metrics,
                     "config": cfg,
                 },

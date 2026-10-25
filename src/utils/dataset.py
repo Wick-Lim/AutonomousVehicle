@@ -53,12 +53,24 @@ class DrivingDataset(Dataset):
         speed_level = int(labels["speed_level"])
         emergency_brake = float(labels["emergency_brake"])
 
+        # Build 6-waypoint (3.0s, dt=0.5s) ground-truth trajectory target [x_m, y_m, v_kmh]
+        speed_map = {0: 0.0, 1: 20.0, 2: 35.0, 3: 50.0}
+        v_tgt_kmh = 0.0 if emergency_brake >= 0.5 else float(speed_map.get(speed_level, 35.0))
+        v_tgt_ms = v_tgt_kmh / 3.6
+        lat_shift = 3.5 if maneuver_idx == 1 else (-3.5 if maneuver_idx == 2 else 0.0)
+        gt_traj: List[List[float]] = []
+        for k in range(1, 7):
+            tau = k / 6.0
+            s_q = (tau ** 3) * (10.0 - 15.0 * tau + 6.0 * tau * tau)
+            gt_traj.append([v_tgt_ms * (0.5 * k), lat_shift * s_q, v_tgt_kmh])
+
         return {
             "image": img_tensor,
             "telemetry": rec["telemetry"],
             "maneuver_idx": maneuver_idx,
             "speed_level": speed_level,
             "emergency_brake": emergency_brake,
+            "target_trajectory": torch.tensor(gt_traj, dtype=torch.float32),
         }
 
     def compute_sample_weights(
@@ -110,12 +122,14 @@ def collate_driving_batch(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     emergency_brake = torch.tensor(
         [item["emergency_brake"] for item in batch], dtype=torch.float32
     )
+    target_trajectory = torch.stack([item["target_trajectory"] for item in batch], dim=0)
     return {
         "images": images,
         "telemetries": telemetries,
         "maneuver_idx": maneuver_idx,
         "speed_level": speed_level,
         "emergency_brake": emergency_brake,
+        "target_trajectory": target_trajectory,
     }
 
 
@@ -126,19 +140,35 @@ def build_dataloaders(
     num_workers: int = 0,
     oversample_cfg: Optional[Dict[str, float]] = None,
     seed: int = 42,
+    split_by_episode: bool = True,
 ) -> Tuple[DataLoader, DataLoader]:
-    """Split dataset into train/val and return (train_loader with oversampling, val_loader)."""
+    """Split dataset into train/val by contiguous episode blocks (preventing adjacent-frame leakage)."""
     full_dataset = DrivingDataset(data_dir=data_dir)
     n_total = len(full_dataset)
-    rng = np.random.default_rng(seed)
-    indices = rng.permutation(n_total).tolist()
 
     n_train = max(1, int(round(n_total * train_split)))
     if n_total - n_train < 1 and n_total >= 2:
         n_train = n_total - 1
 
-    train_records = [full_dataset.records[i] for i in indices[:n_train]]
-    val_records = [full_dataset.records[i] for i in indices[n_train:]]
+    if split_by_episode:
+        # Group by episode_id (or contiguous trajectory blocks) so no episode spans both train and val
+        ep_groups: Dict[int, List[Dict[str, Any]]] = {}
+        for idx, rec in enumerate(full_dataset.records):
+            ep_id = int(rec.get("episode_id", idx // 100))
+            ep_groups.setdefault(ep_id, []).append(rec)
+        ep_ids = sorted(ep_groups.keys())
+        if len(ep_ids) >= 2:
+            n_train_eps = max(1, min(len(ep_ids) - 1, int(round(len(ep_ids) * train_split))))
+            train_records = [r for eid in ep_ids[:n_train_eps] for r in ep_groups[eid]]
+            val_records = [r for eid in ep_ids[n_train_eps:] for r in ep_groups[eid]]
+        else:
+            train_records = full_dataset.records[:n_train]
+            val_records = full_dataset.records[n_train:]
+    else:
+        rng = np.random.default_rng(seed)
+        indices = rng.permutation(n_total).tolist()
+        train_records = [full_dataset.records[i] for i in indices[:n_train]]
+        val_records = [full_dataset.records[i] for i in indices[n_train:]]
     if not val_records:
         val_records = train_records
 

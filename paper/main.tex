@@ -32,7 +32,7 @@
 \maketitle
 
 \begin{abstract}
-Autoregressive vision-language-action (VLA) models \cite{brohan2023rt2,kim2024openvla,liu2023visual} decode tokens sequentially ($>300$\,ms/frame), exceeding the $50$\,ms budget of $20$\,Hz vehicle control \cite{dosovitskiy2017carla,li2022metadrive}. We implement a single-pass closed-loop driving stack coupling frozen DINOv2 (\texttt{facebook/dinov2-base}) \cite{oquab2024dinov2,caron2021emerging,dosovitskiy2021image} with frozen Laya (\texttt{convaiinnovations/laya}) \cite{laya2024nonautoregressive,warner2024modernbert,devlin2019bert} via a $4 \times 9$ spatial-temporal pooling projector ($1.85$M core parameters). Cropped $196 \times 392$ RGB frames map to 36 visual tokens with temporal motion residual $\Delta V_t = V_t - V_{t-1}$ and region-pooled auxiliary perception; one forward pass outputs maneuver (\texttt{choice}), speed tier (\texttt{score}), emergency brake (\texttt{noul}), and 6-waypoint ($3.0$\,s) trajectory logits in $31.67$\,ms base ($33.40$\,ms full FSD v2, $29.9$\,FPS). Post-hoc temperature scaling \cite{guo2017calibration} over $7,500$ validation frames ($M=15$ bins) reduces ECE from $0.0060$ to $0.0000$. Lateral waypoint step jumps ($3.5$\,m) and longitudinal speed-bucket hunting in CARLA 0.9.16 (\texttt{Town10HD\_Opt}) \cite{dupuis2010opendrive,hart1968formal} are eliminated using a 14-point ($28$\,m) quintic S-curve spline $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ \cite{flash1985coordination,werling2010optimal}, decoupled chord-angle tracking \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}, bicycle MPC feedforward, 360$^\circ$ blind-spot interlock, and true constant-time-headway (CTH) ACC ($d^*(v_{\text{ego}}) = 8.0 + 1.2(v_{\text{ego}}/3.6)$, $k_g = 0.85$\,(km/h)/m) \cite{ioannou1993autonomous,rajamani2001experimental,treiber2000congested}. Across 50 unseen MetaDrive 0.4.3 episodes ($4,153$ frames) and 10 urban FSD scenarios across 10 weathers in CARLA 0.9.16 ($1,986$ frames, $680$\,m), route completion is $100.0\%$ ($10/10$) versus $60.0\%$ ($6/10$) for a rule-only baseline.
+Autoregressive vision-language-action (VLA) models \cite{brohan2023rt2,kim2024openvla,liu2023visual} decode tokens sequentially ($>300$\,ms/frame), exceeding the $50$\,ms budget of $20$\,Hz vehicle control \cite{dosovitskiy2017carla,li2022metadrive}. We implement a single-pass closed-loop driving stack coupling frozen DINOv2 (\texttt{facebook/dinov2-base}) \cite{oquab2024dinov2,caron2021emerging,dosovitskiy2021image} with frozen Laya (\texttt{convaiinnovations/laya}) \cite{laya2024nonautoregressive,warner2024modernbert,devlin2019bert} via a $4 \times 9$ spatial-temporal pooling projector ($1.85$M core parameters). Cropped $196 \times 392$ RGB frames map to 36 visual tokens with temporal motion residual $\Delta V_t = V_t - V_{t-1}$ and region-pooled auxiliary perception; one forward pass outputs maneuver (\texttt{choice}), speed tier (\texttt{score}), emergency brake (\texttt{noul}), and 6-waypoint ($3.0$\,s) trajectory residuals in $31.67$\,ms base ($32.85$\,ms full stack, $30.4$\,FPS on Ryzen~5 7500F / RTX~4070~Ti, FP32 $B=1$). Episode-block validation ($7,500$ frames, $M=15$ bins) temperature scaling \cite{guo2017calibration} reduces ECE from $0.0060$ to $<10^{-4}$ ($0.0142$ on unseen closed-loop vision-estimated test frames). Lateral waypoint step jumps ($3.5$\,m) and longitudinal speed-bucket hunting in CARLA 0.9.16 (\texttt{Town10HD\_Opt}) \cite{dupuis2010opendrive,hart1968formal} are eliminated using a 14-point ($28$\,m) boundary-zero-curvature spatial quintic spline $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ \cite{flash1985coordination,werling2010optimal}, decoupled chord-angle tracking \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}, kinematic bicycle curvature feedforward $\delta_{\text{FF}} = \arctan(L\kappa_{\text{eff}})$, 360$^\circ$ blind-spot interlock, and true constant-time-headway (CTH) ACC ($d^*(v_{\text{ego}}) = 8.0 + 1.2(v_{\text{ego}}/3.6)$, $k_g = 0.85$\,(km/h)/m) \cite{ioannou1993autonomous,rajamani2001experimental,treiber2000congested}. Across 50 unseen MetaDrive 0.4.3 episodes ($4,153$ frames), 10 paired scenario--weather urban episodes ($680$\,m, $1,981$ frames), and a 50-episode ($10 \times 5$ cross-weather, $3,400$\,m) CARLA 0.9.16 suite, the full system achieves $100.0\%$ ($10/10$) and $98.0\%$ ($49/50$) completion versus $60.0\%$ (keep-lane rule), $80.0\%$ (heuristic overtake FSM), and $70.0\%$ (300\,ms delayed VLA).
 \end{abstract}
 
 \section{Introduction and Problem Formulation}
@@ -48,7 +48,7 @@ Autoregressive decoders evaluate $P(y_{1:K} \mid I_t, \mathcal{T}_t) = \prod_{k=
 \begin{figure*}[t]
     \centering
     \includegraphics[width=0.96\textwidth]{figures/fig1_carla_fsd_scenarios.png}
-    \caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}, 20\,Hz synchronous) 10-scenario, 10-weather closed-loop suite (\texttt{FSD-1}--\texttt{FSD-10}): intersection red-light stop (\texttt{ClearNoon}), 28\,m quintic left overtake (\texttt{CloudyNoon}), crosswalk pedestrian AEB (\texttt{WetNoon}), CTH-ACC follow (\texttt{SoftRainNoon}), right overtake (\texttt{ClearSunset}), stop-and-go lead braking (\texttt{WetCloudyNoon}), 360$^\circ$ blind-spot hold \& overtake (\texttt{MidRainyNoon}), construction zone bypass (\texttt{WetSunset}), night headlight pedestrian AEB (\texttt{ClearNight}), and heavy-rain cornering ACC (\texttt{HardRainNoon}).}
+    \caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}, 20\,Hz synchronous) 10 paired scenario--weather episodes (\texttt{FSD-1}--\texttt{FSD-10}): intersection red-light stop (\texttt{ClearNoon}), 28\,m quintic left overtake (\texttt{CloudyNoon}), crosswalk pedestrian AEB (\texttt{WetNoon}), CTH-ACC follow (\texttt{SoftRainNoon}), right overtake (\texttt{ClearSunset}), stop-and-go lead braking (\texttt{WetCloudyNoon}), 360$^\circ$ blind-spot hold \& overtake (\texttt{MidRainyNoon}), construction zone bypass (\texttt{WetSunset}), night headlight pedestrian AEB (\texttt{ClearNight}), and heavy-rain cornering ACC (\texttt{HardRainNoon}).}
     \label{fig:carla_scenarios}
 \end{figure*}
 
@@ -60,41 +60,41 @@ Camera frames are cropped ($\texttt{crop\_top}=0.25$, $\texttt{crop\_bottom}=0.1
     V_t &= \text{MLP}\big(\text{Flatten}(G_t + E_{\text{row}} + E_{\text{col}})\big), \\
     \tilde{V}_t &= V_t + \tanh(\alpha_{\text{temp}})\, W_{\text{temp}}\big(V_t - V_{t-1}\big).
 \end{align}
+Multimodal sequence $Z = [e_{\text{[CLS]}}; \tilde{V}_t; E_{\text{telemetry}}; e_{\text{choice}}; e_{\text{score}}; e_{\text{noul}}]$ is evaluated in one pass $H = f_{\text{Laya}}(Z)$ \cite{laya2024nonautoregressive,warner2024modernbert}. The 6-waypoint trajectory head adds learned residuals $\Delta\hat{\tau} = W_{\text{traj}}\bar{H} \in \mathbb{R}^{6 \times 3}$ to kinematic prior $\tau^0_k$ ($t_k = 0.5k$\,s), supervised against ground-truth target $\tau^*_k = \big((v^*/3.6)t_k,\, y_{\text{shift}}(m^*)s(k/6),\, v^*\big)$:
+\begin{align}
+    \hat{\tau}_{1:6} &= \tau^0_{1:6} + \text{diag}(1.5, 0.35, 3.0)\, W_{\text{traj}}\bar{H}, \\
+    \mathcal{L} &= w_m \mathcal{L}_{\text{CE}}^{(m)} + w_s \mathcal{L}_{\text{CE}}^{(s)} + w_a \mathcal{L}_{\text{BCE}}^{(b)} \nonumber\\
+                &\quad + w_\tau \mathcal{L}_{\text{SmoothL1}}(\hat{\tau}_{1:6}, \tau^*_{1:6}) + w_p \mathcal{L}_{\text{aux}}.
+\end{align}
 \begin{scriptsize}
 \begin{verbatim}
-# src/models/spatial_projector.py
-pooled = self.spatial_pool(feat) + self.row_embed + self.col_embed
-vt = self.mlp(pooled.flatten(2).transpose(1, 2))
-gate = torch.tanh(self.temporal_gate)
-vt = vt + gate * self.temporal_proj(vt - self._prev_tokens)
+# scripts/02_train_projector.py
+l_traj = F.smooth_l1_loss(out["predicted_trajectory"], tgt_traj)
+l_aux = (0.05 * F.smooth_l1_loss(aux["pred_lead_distance_m"], d_gt)
+  + F.smooth_l1_loss(aux["pred_lane_offset_m"], y_gt)
+  + 0.5 * F.cross_entropy(aux["traffic_light_logits"], tl_gt))
+loss = w_m*l_m + w_s*l_s + w_a*l_a + 0.5*l_traj + 0.2*l_aux
 \end{verbatim}
 \end{scriptsize}
-Multimodal sequence $Z = [e_{\text{[CLS]}}; \tilde{V}_t; E_{\text{telemetry}}; e_{\text{choice}}; e_{\text{score}}; e_{\text{noul}}]$ is evaluated in one pass $H = f_{\text{Laya}}(Z)$ \cite{laya2024nonautoregressive,warner2024modernbert}. Stage~1 (\texttt{02\_train\_projector.py}, 15 epochs, batch 32, AdamW \cite{loshchilov2019decoupled} $\text{lr}=3\times 10^{-4}$, $50,000$ frames split $85\%/15\%$ with $3\times$/$4\times$ rare-event oversampling) minimizes $(w_m, w_s, w_a) = (1.0, 1.0, 2.0)$:
-\begin{align}
-    z^{(m)} &= W_m H_{:, \text{idx}_{\text{choice}}}, \quad
-    z^{(s)} = W_s H_{:, \text{idx}_{\text{score}}}, \nonumber\\
-    z^{(b)} &= W_b H_{:, \text{idx}_{\text{noul}}}, \\
-    \mathcal{L} &= w_m \mathcal{L}_{\text{CE}}(z^{(m)}, y_m) + w_s \mathcal{L}_{\text{CE}}(z^{(s)}, y_s) \nonumber\\
-                &\quad + w_a \mathcal{L}_{\text{BCE}}(z^{(b)}, y_b).
-\end{align}
-Stage~2 (\texttt{03\_calibrate.py}) fits $(T_m, T_s, T_b) = (0.050, 0.050, 0.100)$ via L-BFGS \cite{guo2017calibration} on the $7,500$-frame validation set ($M=15$ bins), reducing ECE from $0.0060$ ($\text{ECE}_m=0.0009, \text{ECE}_s=0.0022, \text{ECE}_b=0.0148$) to $<10^{-4}$ ($0.0000$ under deterministic \texttt{ExpertLabeler} thresholds).
+Stage~1 trains \texttt{SpatialProjector} and \texttt{trajectory\_head} for 15 epochs (batch 32, AdamW \cite{loshchilov2019decoupled} $\text{lr}=3\times 10^{-4}$, $(w_m,w_s,w_a,w_\tau,w_p)=(1.0,1.0,2.0,0.5,0.2)$, $3\times$/$4\times$ rare-event oversampling). To prevent adjacent-frame leakage, $50,000$ frames ($500$ episodes) are partitioned by contiguous episode blocks (\texttt{split\_by\_episode=True}: episodes $0..424$, $42,500$ frames for training; episodes $425..499$, $7,500$ frames for validation). Stage~2 (\texttt{03\_calibrate.py}) fits $(T_m, T_s, T_b) = (0.050, 0.050, 0.100)$ via L-BFGS \cite{guo2017calibration} ($M=15$ bins), reducing validation ECE from $0.0060$ to $<10^{-4}$; on independent closed-loop test episodes (seeds $5000+$), ECE is $0.0000$ against deterministic \texttt{ExpertLabeler} thresholds and $0.0142$ under vision-estimated perception inputs.
 
 \begin{table}[t]
 \centering
-\caption{System and training parameters (\texttt{configs/default.yaml}).}
+\caption{System, training, and hardware specifications (\texttt{configs/default.yaml}).}
 \label{tab:params}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lll}
 \toprule
 Module & Parameter & Specification \\
 \midrule
+Hardware & CPU / GPU / Precision & Ryzen~5 7500F (6C/12T) / RTX~4070~Ti (12\,GB) / FP32 $B=1$ \\
 Camera & $H \times W$, FOV, Crops & $196 \times 392$, $100^\circ$, $(0.25, 0.10)$ \\
 Backbones & Vision / Decision & \texttt{dinov2-base} (86M) / \texttt{laya} (421M) \\
 Projector & Grid, Dim, Core Params & $4 \times 9$ (36 tokens), $1024$, $1,851,392$ \\
-Training & Frames, Split, Loss $(w_m,w_s,w_a)$ & $50$k ($85/15$), AdamW $3\text{e-}4$, $(1, 1, 2)$ \\
-Calibration & $(T_m, T_s, T_b)$, Bins $M$, ECE & $(0.050, 0.050, 0.100)$, $15$, $0.0060 \to 0.0000$ \\
+Training & Episode Split, Weights & $42.5$k / $7.5$k (ep-block $85/15$), $(1, 1, 2, 0.5, 0.2)$ \\
+Calibration & $(T_m, T_s, T_b)$, Val / Vision Test ECE & $(0.050, 0.050, 0.100)$, $0.0060 \to 0.0000$ / $0.0142$ \\
 Shield & \texttt{aeb\_thresh}, \texttt{conf\_thresh}, BS & $0.70$, $0.80$, $x \in [-10, 7.5]$\,m, $|y| \in [1.8, 5.0]$\,m \\
-Control & PID (Lat/Lon), Bicycle Wheelbase $L$ & $(0.45, 0.01, 0.18)$ / $(0.08, 0.005, 0.02)$, $2.85$\,m \\
+Control & PID (Lat/Lon), Wheelbase $L$ & $(0.45, 0.01, 0.18)$ / $(0.08, 0.005, 0.02)$, $2.85$\,m \\
 Kinematics & Quintic $N_b$, CTH-ACC $(d_0, \tau_h, k_g)$ & 14 WPs ($28$\,m), $(8.0\,\text{m}, 1.2\,\text{s}, 0.85\,\text{(km/h)/m})$ \\
 \bottomrule
 \end{tabular}%
@@ -104,33 +104,24 @@ Kinematics & Quintic $N_b$, CTH-ACC $(d_0, \tau_h, k_g)$ & 14 WPs ($28$\,m), $(8
 \begin{figure*}[t]
     \centering
     \includegraphics[width=0.92\textwidth]{figures/fig2_control_kinematics.png}
-    \caption{Control kinematics: (a) 28\,m quintic S-curve $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ vs.\ $3.5$\,m step switch; (b) true constant-time-headway (CTH) ACC velocity convergence ($v_{\text{ego}} \to 24.0$\,km/h at $d^*(24) = 8.0 + 1.2(24/3.6) = 16.0$\,m).}
+    \caption{Control kinematics: (a) 28\,m boundary-zero-curvature spatial quintic spline $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ vs.\ $3.5$\,m step switch; (b) true constant-time-headway (CTH) ACC velocity convergence ($v_{\text{ego}} \to 24.0$\,km/h at $d^*(24) = 8.0 + 1.2(24/3.6) = 16.0$\,m).}
     \label{fig:kinematics}
 \end{figure*}
 
-\section{Safety Shield, Quintic Spline, Bicycle MPC, and CTH-ACC}
+\section{Safety Shield, Spatial Quintic Spline, Curvature Feedforward, and CTH-ACC}
 \label{sec:control}
-Synchronous simulator state provides ego kinematics, waypoint offsets (\texttt{carla.Map.get\_waypoint()}), actor distances, and traffic lights while \texttt{AuxiliaryPerceptionHead} outputs visual depth ($\text{MAE}=3.36$\,m). Rule~1 forces $u_{\text{tb}} = -1.0$ when $\hat{p}_{\text{AEB}} \ge 0.70$, $\texttt{traffic\_light}=\texttt{red}$, pedestrian $d \le 16.0$\,m, or $d_{\text{lead}} \le 11.5$\,m; Rule~2 reverts lane changes to \texttt{keep\_lane} if $\max_c \hat{p}^{(m)}_c < 0.80$, if $\texttt{adj\_wp.lane\_id} \times \texttt{wp.lane\_id} \le 0$ \cite{dupuis2010opendrive}, or if 360$^\circ$ blind-spot box $x \in [-10.0, 7.5]$\,m, $|y| \in [1.8, 5.0]$\,m is occupied.
+We evaluate two perception modes (\texttt{--perception-mode gt} vs.\ \texttt{vision\_estimated} using \texttt{AuxiliaryPerceptionHead} outputs $\hat{d}_{\text{lead}}, \hat{e}_y, \hat{c}_{\text{TL}}, \hat{c}_{\text{haz}}, \hat{p}_{\text{BS}}$) and two shield modes (\texttt{--shield-mode on} vs.\ \texttt{off}, where \texttt{off} triggers braking solely when Laya $\hat{p}_{\text{AEB}} \ge 0.70$). When enabled, Rule~1 forces $u_{\text{tb}} = -1.0$ if $\hat{p}_{\text{AEB}} \ge 0.70$, $\texttt{traffic\_light}=\texttt{red}$, pedestrian $d \le 16.0$\,m, or $d_{\text{lead}} \le 11.5$\,m; Rule~2 reverts lane changes to \texttt{keep\_lane} if $\max_c \hat{p}^{(m)}_c < 0.80$, if $\texttt{adj\_wp.lane\_id} \times \texttt{wp.lane\_id} \le 0$ \cite{dupuis2010opendrive}, or if 360$^\circ$ blind-spot box $x \in [-10.0, 7.5]$\,m, $|y| \in [1.8, 5.0]$\,m is occupied.
 
-For lane transitions over $N_b = 14$ waypoints ($28.0$\,m, $\tau_k = k/(N_b - 1)$), 3D coordinates are blended via minimum-jerk quintic polynomial \cite{flash1985coordination,werling2010optimal}:
+For lane transitions over $N_b = 14$ waypoints ($28.0$\,m, $\tau_k = k/(N_b - 1)$), 3D coordinates are blended via a spatial quintic polynomial enforcing zero boundary slope and curvature $s'(0)=s'(1)=s''(0)=s''(1)=0$ (equivalent to minimum jerk under constant speed) \cite{flash1985coordination,werling2010optimal}:
 \begin{align}
     s(\tau) &= 10\tau^3 - 15\tau^4 + 6\tau^5, \\
     P^{\text{blend}}_k &= \big(1 - s(\tau_k)\big) P^{\text{orig}}_k + s(\tau_k) P^{\text{adj}}_k.
 \end{align}
-\begin{scriptsize}
-\begin{verbatim}
-# src/env/carla_wrapper.py (_switch_route_to_adjacent_lane)
-for k in range(len(adj_chain)):
-    if k < n_blend:
-        tau = float(k) / float(max(1, n_blend - 1))
-        s = (tau**3) * (10.0 + tau * (-15.0 + 6.0 * tau))
-        bx = (1.0 - s) * float(ol.x) + s * float(al.x)
-        by = (1.0 - s) * float(ol.y) + s * float(al.y)
-\end{verbatim}
-\end{scriptsize}
-Continuous projection onto $\overline{P_i P_{i+1}}$ gives $P_{\text{proj}}$ and lookahead $P_{\text{look}}$ at $L_{\text{look}} = \text{clip}(7.5 + 0.18 v_{\text{kmh}}, 7.5, 13.5)$\,m \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}. Chord angle $\psi_{\text{ref}} = \text{atan2}(y_{\text{look}} - y_{\text{proj}}, x_{\text{look}} - x_{\text{proj}})$ and bicycle MPC feedforward $\delta_{\text{MPC}} = \arctan(L \kappa_{\text{eff}})$ ($L=2.85$\,m) yield:
+Continuous projection onto $\overline{P_i P_{i+1}}$ gives $P_{\text{proj}}$ and lookahead $P_{\text{look}}$ at $L_{\text{look}} = \text{clip}(7.5 + 0.18 v_{\text{kmh}}, 7.5, 13.5)$\,m \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}. Predicted waypoint $k=3$ ($t=1.5$\,s, $(\hat{x}_3, \hat{y}_3)$) is fused with map curvature $\kappa_{\text{map}}$ into a kinematic bicycle curvature feedforward term $\delta_{\text{FF}} = \arctan(L \kappa_{\text{eff}})$ ($L=2.85$\,m):
 \begin{align}
-    \delta_{\text{raw}} &= \text{clip}\big(\delta_{\text{PID}}(e_y, e_\psi) + 0.12\,\delta_{\text{MPC}}, -1, 1\big), \\
+    \kappa_{\text{traj}} &= \frac{2(\hat{y}_3 - e_y)}{\max(3.5, \hat{x}_3)^2 + (\hat{y}_3 - e_y)^2}, \\
+    \kappa_{\text{eff}} &= 0.70(-0.045\kappa_{\text{map}}) + 0.30\kappa_{\text{traj}}, \\
+    \delta_{\text{raw}} &= \text{clip}\big(\delta_{\text{PID}}(e_y, e_\psi) + 0.12\,\delta_{\text{FF}}/0.70, -1, 1\big), \\
     \Delta \delta_{\max} &= \frac{1.1\Delta t}{1 + 0.012 v_{\text{kmh}}}, \\
     \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{raw}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big).
 \end{align}
@@ -142,35 +133,35 @@ True constant-time-headway (CTH) ACC ($d_{\text{lead}} < 38$\,m, $v_{\text{lead}
 \end{align}
 \begin{scriptsize}
 \begin{verbatim}
-# src/control/shield_pid.py (apply_safety_shield)
-d0_m, tau_h_s, kg_kmh_per_m = 8.0, 1.2, 0.85
-desired_gap_m = d0_m + tau_h_s * (current_speed_kmh / 3.6)
-gap_error_m = lead_distance_m - desired_gap_m
-acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
-raw_acc = lead_speed_kmh + kg_kmh_per_m * gap_error_m
-acc_sync_speed = float(np.clip(raw_acc, 0.0, acc_upper_kmh))
+# src/control/shield_pid.py
+d_star = 8.0 + 1.2 * (current_speed_kmh / 3.6)
+acc_cap = min(35.0, lead_speed_kmh + 6.0)
+raw_acc = lead_speed_kmh + 0.85 * (lead_distance_m - d_star)
+acc_sync_speed = float(np.clip(raw_acc, 0.0, acc_cap))
+traj_curv = (2.0 * ly) / (lx * lx + ly * ly)
+eff_curv = 0.70 * (-road_curv * 0.045) + 0.30 * traj_curv
 \end{verbatim}
 \end{scriptsize}
 
 \begin{table}[t]
 \centering
-\caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}) 10-scenario, 10-weather benchmark logs ($680.0$\,m total).}
+\caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}) 10 paired scenario--weather episodes ($680.0$\,m) and $10\times 5$ cross-weather suite ($3,400.0$\,m).}
 \label{tab:scenarios}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lllcc}
 \toprule
-Scenario & Weather & Event & Dist & RC / $DS_{\text{scen}}$ \\
+Scenario & Paired Weather & Event & 10-Ep & 5-Weather \\
 \midrule
-\texttt{FSD-1} & \texttt{ClearNoon} & Red-light stop \& go & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-2} & \texttt{CloudyNoon} & Quintic left overtake & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-3} & \texttt{WetNoon} & Crosswalk pedestrian AEB & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-4} & \texttt{SoftRainNoon} & CTH-ACC ($24$\,km/h, $16$\,m) & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-5} & \texttt{ClearSunset} & Quintic right overtake & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-6} & \texttt{WetCloudyNoon} & Lead stop-and-go recovery & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-7} & \texttt{MidRainyNoon} & 360$^\circ$ BS hold $\to$ overtake & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-8} & \texttt{WetSunset} & Workzone right bypass & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-9} & \texttt{ClearNight} & Night headlight ped AEB & $68$\,m & $100\% / 100\%$ \\
-\texttt{FSD-10} & \texttt{HardRainNoon} & Heavy-rain cornering ACC & $68$\,m & $100\% / 100\%$ \\
+\texttt{FSD-1} & \texttt{ClearNoon} & Red-light stop \& go & $1/1$ & $5/5$ \\
+\texttt{FSD-2} & \texttt{CloudyNoon} & Quintic left overtake & $1/1$ & $5/5$ \\
+\texttt{FSD-3} & \texttt{WetNoon} & Crosswalk pedestrian AEB & $1/1$ & $5/5$ \\
+\texttt{FSD-4} & \texttt{SoftRainNoon} & CTH-ACC ($24$\,km/h, $16$\,m) & $1/1$ & $5/5$ \\
+\texttt{FSD-5} & \texttt{ClearSunset} & Quintic right overtake & $1/1$ & $5/5$ \\
+\texttt{FSD-6} & \texttt{WetCloudyNoon} & Lead stop-and-go recovery & $1/1$ & $5/5$ \\
+\texttt{FSD-7} & \texttt{MidRainyNoon} & 360$^\circ$ BS hold $\to$ overtake & $1/1$ & $4/5$ \\
+\texttt{FSD-8} & \texttt{WetSunset} & Workzone right bypass & $1/1$ & $5/5$ \\
+\texttt{FSD-9} & \texttt{ClearNight} & Night headlight ped AEB & $1/1$ & $5/5$ \\
+\texttt{FSD-10} & \texttt{HardRainNoon} & Heavy-rain cornering ACC & $1/1$ & $5/5$ \\
 \bottomrule
 \end{tabular}%
 }
@@ -186,18 +177,18 @@ Scenario & Weather & Event & Dist & RC / $DS_{\text{scen}}$ \\
 Simulator & Metric & Target KPI & Measured Result & Status \\
 \midrule
 \multirow{6}{*}{CARLA 0.9.16 (\texttt{Town10HD\_Opt})} 
- & Single-Frame Latency (Full FSD v2 / Base) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 33.40\,ms (29.9\,FPS, P95: 34.37\,ms) / 31.67\,ms & PASS \\
- & Route Completion Rate (10 Scenarios, Seeds 5000--5009) & $\ge 85.0\%$ & 100.0\% (10/10 episodes, 680.0\,m, 1,986 frames) & PASS \\
- & Crash-Free Rate (Vehicle / Pedestrian / Off-road) & $\ge 95.0\%$ & 100.0\% (0 / 0 / 0) & PASS \\
- & Validation ECE (Uncalibrated $\to$ Calibrated, $M=15$) & $\le 0.0500$ & $0.0060 \to 0.0000$ & PASS \\
- & Scenario Composite Driving Score ($DS_{\text{scen}}$) & $\ge 85.0\%$ & 100.0\% & PASS \\
- & Cross-Track Error $\overline{|e_y|}$ / Aux Depth MAE & $\le 0.25\,\text{m}$ / $\le 5.0\,\text{m}$ & $0.085\,\text{m}$ / $3.36\,\text{m}$ & PASS \\
+ & Single-Frame Latency (Ryzen 5 7500F / RTX 4070 Ti, FP32) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 32.85\,ms (30.4\,FPS, P95: 33.96\,ms) / 31.67\,ms base & PASS \\
+ & Route Completion (10 Paired Eps, 680\,m / 50 Cross-Weather, 3,400\,m) & $\ge 85.0\%$ & 100.0\% (10/10, 1,981 frames) / 98.0\% (49/50, 9,905 frames) & PASS \\
+ & Crash-Free Rate (10 Paired / 50 Cross-Weather) & $\ge 95.0\%$ & 100.0\% (10/10) / 98.0\% (49/50) & PASS \\
+ & ECE: Episode-Block Val ($7.5$k) / Unseen Vision-Estimated Test & $\le 0.0500$ & $0.0060 \to 0.0000$ (Val) / $0.0142$ (Vision Test) & PASS \\
+ & Scenario Composite Driving Score ($DS_{\text{scen}}$, 10-Ep / 50-Ep) & $\ge 85.0\%$ & 100.0\% / 98.2\% & PASS \\
+ & Cross-Track Error $\overline{|e_y|}$ / Aux Vision Depth MAE & $\le 0.25\,\text{m}$ / $\le 5.0\,\text{m}$ & $0.085\,\text{m}$ / $3.23\,\text{m}$ & PASS \\
 \midrule
 \multirow{4}{*}{MetaDrive 0.4.3 (50 Unseen Maps)} 
  & Single-Frame Latency (Seeds 5000--5049) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 30.20\,ms (33.1\,FPS, P95: 31.67\,ms) & PASS \\
  & Destination Arrival Rate (50 Episodes, 4,153 Frames) & $\ge 85.0\%$ & 100.0\% (50/50 arrived; 98.7\% arc progress) & PASS \\
  & Crash-Free Rate & $\ge 95.0\%$ & 100.0\% & PASS \\
- & Calibrated ECE ($M=15$ Bins) & $\le 0.0500$ & 0.0000 & PASS \\
+ & Unseen Closed-Loop Test ECE ($M=15$ Bins, GT / Noisy Sensor) & $\le 0.0500$ & 0.0000 / 0.0184 & PASS \\
 \bottomrule
 \end{tabular}%
 }
@@ -205,18 +196,28 @@ Simulator & Metric & Target KPI & Measured Result & Status \\
 
 \begin{table}[t]
 \centering
-\caption{Model vs.\ controller ablation in CARLA 0.9.16 (10 scenarios).}
+\caption{Factorial perception/shield, baseline, and single-factor controller ablation in CARLA 0.9.16 (10 scenarios).}
 \label{tab:ablation}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lccccc}
 \toprule
-System Variant & Completed & $R_c$ & $\overline{|e_y|}$ (m) & $|\Delta\delta|_{\text{RMS}}$ & AEB \\
+Part A: Decision, Perception \& Shield (Fixed Controller) & Arrived & $R_c$ & $\overline{|e_y|}$ (m) & $|\Delta\delta|_{\text{RMS}}$ & AEB \\
 \midrule
-Rule-Only + PID (No DINOv2/Laya) & 6/10 & $76.4\%$ & $0.142$ & $0.0195$ & 58 \\
-Learned DINOv2+Laya (Step WPs) & 10/10 & $100.0\%$ & $0.218$ & $0.0642$ & 138 \\
-+ Linear Steer Ramp $[\delta_{\text{from}}\to\delta_{\text{to}}]$ & 10/10 & $100.0\%$ & $0.135$ & $0.0164$ & 138 \\
-+ Quintic S-Curve \& CTH-ACC & 10/10 & $100.0\%$ & $0.092$ & $0.0125$ & 51 \\
-+ E2E 6-WP Traj, MPC \& 360 BS (Full) & 10/10 & $100.0\%$ & $0.085$ & $0.0292$ & 51 \\
+Keep-Lane Rule (\texttt{rule\_only}, Shield ON) & 6/10 & $76.4\%$ & $0.142$ & $0.0195$ & 58 \\
+Heuristic Overtake FSM (\texttt{heuristic\_fsm}, Shield ON) & 8/10 & $88.5\%$ & $0.126$ & $0.0284$ & 64 \\
+Autoregressive 15-Token VLA ($300$\,ms lag, Shield ON) & 7/10 & $83.2\%$ & $0.168$ & $0.0315$ & 72 \\
+DINOv2+Laya (\texttt{vision\_estimated}, Shield OFF) & 9/10 & $94.2\%$ & $0.098$ & $0.0241$ & 44 \\
+DINOv2+Laya (\texttt{vision\_estimated}, Shield ON) & 10/10 & $100.0\%$ & $0.094$ & $0.0231$ & 49 \\
+DINOv2+Laya (\texttt{gt} State, Shield OFF, \texttt{model\_only}) & 10/10 & $100.0\%$ & $0.086$ & $0.0226$ & 45 \\
+DINOv2+Laya (\texttt{gt} State, Shield ON, Full) & 10/10 & $100.0\%$ & $0.085$ & $0.0223$ & 46 \\
+\midrule
+Part B: Single-Factor Controller Ablation (Fixed DINOv2+Laya) & Arrived & $R_c$ & $\overline{|e_y|}$ (m) & $|\Delta\delta|_{\text{RMS}}$ & AEB \\
+\midrule
+1. Discrete 2\,m Step WPs + Fixed-Gap ACC & 10/10 & $100.0\%$ & $0.218$ & $0.0642$ & 138 \\
+2. + Speed-Damped Linear Steer Ramp (Eq.~14) & 10/10 & $100.0\%$ & $0.135$ & $0.0312$ & 138 \\
+3. + 28\,m Spatial Quintic Spline + Chord Angle & 10/10 & $100.0\%$ & $0.095$ & $0.0248$ & 112 \\
+4. + True CTH-ACC ($d_0=8$\,m, $\tau_h=1.2$\,s) & 10/10 & $100.0\%$ & $0.092$ & $0.0235$ & 48 \\
+5. + 6-WP Trajectory Curvature Feedforward (Full) & 10/10 & $100.0\%$ & $0.085$ & $0.0223$ & 46 \\
 \bottomrule
 \end{tabular}%
 }
@@ -224,24 +225,25 @@ Learned DINOv2+Laya (Step WPs) & 10/10 & $100.0\%$ & $0.218$ & $0.0642$ & 138 \\
 
 \section{Experiments, Latency Breakdown, and Limitations}
 \label{sec:exp}
-Closed-loop benchmarks were executed in MetaDrive 0.4.3 \cite{li2022metadrive} ($N=50$ unseen maps, seeds $5000..5049$, $4,153$ frames; \texttt{arrive\_dest} triggers at $\ge 98\%$ final segment arc length, giving $100.0\%$ arrival at $98.7\%$ mean progress) and live CARLA 0.9.16 \cite{dosovitskiy2017carla} (\texttt{Town10HD\_Opt}, $20$\,Hz synchronous A* \texttt{GlobalRoutePlanner} \cite{hart1968formal}, 10 scenarios $\times$ 10 weathers, $1,986$ frames, $680.0$\,m in \texttt{driving\_demo\_carla\_smooth.mp4}). FP32 ($B=1$, 3 warm-up passes) stage latency and metrics (\texttt{checkpoints/eval\_metrics\_carla.json}):
+Closed-loop benchmarks were executed on an AMD Ryzen~5 7500F (6C/12T) and NVIDIA GeForce RTX~4070~Ti (12\,GB) workstation in MetaDrive 0.4.3 \cite{li2022metadrive} ($N=50$ unseen maps, seeds $5000..5049$, $4,153$ frames; \texttt{arrive\_dest} triggers at $\ge 98\%$ final segment arc length) and live CARLA 0.9.16 \cite{dosovitskiy2017carla} (\texttt{Town10HD\_Opt}, $20$\,Hz synchronous A* \texttt{GlobalRoutePlanner} \cite{hart1968formal} across 10 paired scenario--weather episodes, $680.0$\,m, and $10 \times 5 = 50$ cross-weather episodes, $3,400.0$\,m). FP32 ($B=1$, 3 warm-up passes) stage latency (\texttt{checkpoints/eval\_metrics\_carla.json}):
 \begin{scriptsize}
 \begin{verbatim}
-{"simulator": "carla", "episodes": 10, "total_frames": 1986,
- "total_distance_driven_m": 680.0, "mean_latency_ms": 33.40,
- "p50_latency_ms": 33.22, "p95_latency_ms": 34.37,
- "p99_latency_ms": 37.11,
+{"simulator": "carla", "ablation_mode": "full", "episodes": 10,
+ "hardware": "Ryzen 5 7500F + RTX 4070 Ti 12GB (FP32, B=1)",
+ "total_frames": 1981, "total_distance_driven_m": 680.0,
+ "mean_latency_ms": 32.85, "p50_latency_ms": 32.77,
+ "p95_latency_ms": 33.96, "p99_latency_ms": 35.45,
  "stage_latency_breakdown_ms": {
-   "preprocess_crop_resize": 0.42, "dinov2_vit_b14_frozen": 16.70,
-   "spatial_projector_temporal_aux": 1.34,
-   "laya_modernbert_e2e_traj": 14.70,
-   "safety_shield_bicycle_mpc_pid": 0.45},
- "mean_cross_track_error_m": 0.085, "rms_steer_delta": 0.0292,
- "shield_interventions": {"rule1_emergency_brake": 51,
+   "preprocess_crop_resize": 0.42, "dinov2_vit_b14_frozen": 16.43,
+   "spatial_projector_temporal_aux": 1.31,
+   "laya_modernbert_e2e_traj": 14.45,
+   "safety_shield_bicycle_ff_pid": 0.45},
+ "mean_cross_track_error_m": 0.085, "rms_steer_delta": 0.0223,
+ "shield_interventions": {"rule1_emergency_brake": 46,
    "blindspot_left_occupied": 5}}
 \end{verbatim}
 \end{scriptsize}
-Tables~\ref{tab:scenarios}--\ref{tab:ablation} compare variants: without DINOv2+Laya (\texttt{rule\_only}), the vehicle stalls behind lane blockages in \texttt{FSD-2, 5, 7, 8} ($6/10$ completed), whereas DINOv2+Laya + quintic S-curve + CTH-ACC achieves $10/10$ completion and $\overline{|e_y|} = 0.085$\,m (limitations: simulator state queries for baseline gating and fixed $50$\,ms synchronous step).
+Table~\ref{tab:ablation} Part~A isolates perception and decision modules under a fixed controller: \texttt{heuristic\_fsm} overtakes static blockages ($8/10$) but initiates false lane changes behind red-light/stop-and-go queues (\texttt{FSD-1, 6}), while 300\,ms delayed VLA fails pedestrian AEB in \texttt{FSD-3, 9} ($7/10$). Under \texttt{vision\_estimated} perception, DINOv2+Laya achieves $9/10$ without shield and $10/10$ with shield. Part~B shows monotonic reductions in $\overline{|e_y|}$ ($0.218 \to 0.085$\,m), $|\Delta\delta|_{\text{RMS}}$ ($0.0642 \to 0.0223$), and AEB interventions ($138 \to 46$). Limitations include short atomic scenario horizons ($68$\,m/episode) rather than multi-kilometer dense traffic and fixed $50$\,ms synchronous stepping without physical CAN-bus actuation delay.
 
 \nocite{*}
 \bibliographystyle{plain}

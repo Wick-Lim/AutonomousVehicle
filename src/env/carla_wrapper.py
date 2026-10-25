@@ -605,9 +605,13 @@ class CarlaWrapper:
         self._carla_steer_prev = 0.0
         self._last_gated_maneuver = "keep_lane"
 
-        scenario_idx = int(abs(seed - 5000)) % len(FSD_SCENARIO_NAMES)
+        ep_offset = int(abs(seed - 5000))
+        scenario_idx = ep_offset % len(FSD_SCENARIO_NAMES)
+        weather_shift = (ep_offset // len(FSD_SCENARIO_NAMES)) * 2
         self._fsd_scenario_name = FSD_SCENARIO_NAMES[scenario_idx]
-        self._weather_preset = FSD_WEATHER_PRESETS[scenario_idx % len(FSD_WEATHER_PRESETS)]
+        self._weather_preset = FSD_WEATHER_PRESETS[
+            (scenario_idx + weather_shift) % len(FSD_WEATHER_PRESETS)
+        ]
         if self._weather_preset in ("ClearNight", "HardRainNoon", "MidRainyNoon"):
             self._fsd_metrics["night_rain_episodes"] += 1
         try:

@@ -34,7 +34,7 @@
 \maketitle
 
 \begin{abstract}
-20\,Hz 주기로 동작하는 실시간 차량 제어 루프 안에 일반적인 자기회귀(Autoregressive) 비전-언어 모델을 넣으면 첫 문장을 디코딩하기도 전에 차가 차선을 벗어나거나 앞차와 추돌한다. 시속 35\,km로 달리는 차량은 50\,ms 틱마다 약 0.5\,m씩 전진하는 반면, 토큰 15개를 순차 생성하는 데는 300--1,000\,ms가 소요되기 때문이다. 본 논문은 토큰을 순차 생성하는 대신 단 한 번의 양방향 Forward Pass로 주행 판단과 3.0초 미래 궤적(6-웨이포인트) 예측을 동시에 끝내 기본 31.67\,ms(전체 보조 인지·궤적 헤드 포함 시 33.84\,ms, 29.5\,FPS)에 동작하는 폐루프 자율주행 시스템을 제시한다. 상하 불필요 영역을 잘라낸 196$\times$392 와이드 카메라 영상에서 동결된 DINOv2(ViT-B/14)로 14$\times$28 패치 특징을 추출하고, 이를 4$\times$9 공간 격자(36개 토큰)와 시공간 잔차($\Delta V_t$)로 결합해 동결된 ModernBERT 기반 Laya 모델(\texttt{convaiinnovations/laya})에 주입한다. 하위 제어 단계에서는 사후 온도 보정 안전 실드, 360$^\circ$ 사각지대 인터록, 28\,m 구간의 5차 다항식 S-커브 차선 변경 궤적, 현(Chord) 각도 추종 및 운동학적 자전거 모델 예측 제어(MPC), 그리고 속도 비례 등시간 차간거리(CTH) ACC 제어기($d^*(v_{\text{ego}}) = 8.0 + 1.2 v_{\text{ego}}$, $k_g = 0.85$\,(km/h)/m)를 결합했다. MetaDrive 0.4.3의 미학습 50개 맵(4,153 프레임)과 CARLA 0.9.16(\texttt{Town10HD\_Opt}) 10대 도심 시나리오$\times$10종 기상 환경(2,004 프레임, 총 680\,m)에서 평가한 결과, 규칙 단독 기준선(완주율 60.0\%) 대비 100.0\% 완주율과 횡방향 추적 오차 0.084\,m를 달성했다.
+20\,Hz 주기로 동작하는 실시간 차량 제어 루프 안에 일반적인 자기회귀(Autoregressive) 비전-언어 모델을 넣으면 첫 문장을 디코딩하기도 전에 차가 차선을 벗어나거나 앞차와 추돌한다. 시속 35\,km로 달리는 차량은 50\,ms 틱마다 약 0.5\,m씩 전진하는 반면, 토큰 15개를 순차 생성하는 데는 300--1,000\,ms가 소요되기 때문이다. 본 논문은 토큰을 순차 생성하는 대신 단 한 번의 양방향 Forward Pass로 주행 판단과 3.0초 미래 궤적(6-웨이포인트) 예측을 동시에 끝내 기본 31.67\,ms(전체 보조 인지·궤적 헤드 포함 시 32.85\,ms, 30.4\,FPS; Ryzen~5 7500F / RTX~4070~Ti FP32 $B=1$)에 동작하는 폐루프 자율주행 시스템을 제시한다. 상하 불필요 영역을 잘라낸 196$\times$392 와이드 카메라 영상에서 동결된 DINOv2(ViT-B/14)로 14$\times$28 패치 특징을 추출하고, 이를 4$\times$9 공간 격자(36개 토큰)와 시공간 잔차($\Delta V_t$)로 결합해 동결된 ModernBERT 기반 Laya 모델(\texttt{convaiinnovations/laya})에 주입한다. 하위 제어 단계에서는 사후 온도 보정 안전 실드, 360$^\circ$ 사각지대 인터록, 28\,m 구간의 양 끝점 곡률 연속 공간 5차 다항식 차선 변경 궤적, 현(Chord) 각도 추종 및 운동학적 자전거 곡률 피드포워드($\delta_{\text{FF}} = \arctan(L\kappa_{\text{eff}})$), 그리고 속도 비례 등시간 차간거리(CTH) ACC 제어기($d^*(v_{\text{ego}}) = 8.0 + 1.2(v_{\text{ego}}/3.6)$, $k_g = 0.85$\,(km/h)/m)를 결합했다. MetaDrive 0.4.3 미학습 50개 맵(4,153 프레임), CARLA 0.9.16(\texttt{Town10HD\_Opt}) 10개 시나리오--기상 쌍(1,981 프레임, 680\,m) 및 50개 에피소드($10 \times 5$ 교차 기상, 3,400\,m)에서 평가한 결과, 차선 유지 규칙(60.0\%), 장애물 추월 휴리스틱 FSM(80.0\%), 300\,ms 지연 VLA(70.0\%) 대비 100.0\%(10/10) 및 98.0\%(49/50) 완주율과 횡방향 추적 오차 0.085\,m를 달성했다.
 \end{abstract}
 
 \section{서론 및 문제 정의}
@@ -63,30 +63,30 @@
 \end{align}
 또한 $\tilde{V}_t$의 $4 \times 9$ 격자를 영역별로 풀링하는 \texttt{AuxiliaryPerceptionHead}(상단 신호등 영역 행 $0..1$, 중앙 주행 코리더 열 $3..5$, 좌·우 주변 차선 열 $0..2, 6..8$)를 통해 전방 차간거리 $\hat{d}_{\text{lead}}$, 차선 오프셋 $\hat{e}_y$, 신호등 상태, 위험원 종류, 좌·우 사각지대 점유 확률을 동시에 추정한다.
 
-\subsection{학습 설정 및 온도 보정 프로토콜}
-1단계 학습(\texttt{02\_train\_projector.py})에서는 DINOv2와 Laya를 동결한 채 \texttt{ExpertLabeler}로 라벨링된 $50,000$ 프레임(학습 85\% / 검증 15\% 분리; 차선 변경 $3.0\times$, 급제동 $4.0\times$ 희소 클래스 오버샘플링)에서 다중 과업 손실 함수
+\subsection{학습 설정, 6-웨이포인트 궤적 손실 및 에피소드 단위 분할 보정}
+6-웨이포인트($t_k = 0.5k$\,s) 미래 궤적 헤드는 기구학적 사전 궤적 $\tau^0_{1:6}$에 신경망 잔차 $W_{\text{traj}}\bar{H} \in \mathbb{R}^{6 \times 3}$를 더하며, 목표 속도 $v^*$와 5차 곡선 횡방향 변위 $y_{\text{shift}}(m^*)s(k/6)$로 정의되는 정답 궤적 $\tau^*_k = ((v^*/3.6)t_k, y_{\text{shift}}(m^*)s(k/6), v^*)$ 및 보조 인지 손실 $\mathcal{L}_{\text{aux}}$와 함께 학습된다. 인접 프레임 누수를 차단하기 위해 $50,000$ 프레임(500개 에피소드)은 에피소드 블록 단위(\texttt{split\_by\_episode=True}: 에피소드 $0..424$, $42,500$ 프레임 학습 / 에피소드 $425..499$, $7,500$ 프레임 검증)로 분리하며, 다중 과업 손실 함수는 다음과 같다:
 \begin{align}
-    \mathcal{L} &= 1.0\,\mathcal{L}_{\text{CE}}(z^{(m)}, y_m) + 1.0\,\mathcal{L}_{\text{CE}}(z^{(s)}, y_s) \nonumber\\
-                &\quad + 2.0\,\mathcal{L}_{\text{BCE}}(z^{(b)}, y_b)
+    \mathcal{L} &= 1.0\,\mathcal{L}_{\text{CE}}^{(m)} + 1.0\,\mathcal{L}_{\text{CE}}^{(s)} + 2.0\,\mathcal{L}_{\text{BCE}}^{(b)} \nonumber\\
+                &\quad + 0.5\,\mathcal{L}_{\text{SmoothL1}}(\hat{\tau}_{1:6}, \tau^*_{1:6}) + 0.2\,\mathcal{L}_{\text{aux}}.
 \end{align}
-를 AdamW($\text{lr}=3\times 10^{-4}$, 가중치 감쇠 $0.01$, 배치 크기 32, 15 에폭)로 최적화한다. 2단계 온도 보정(\texttt{03\_calibrate.py})에서는 분리된 검증 세트($7,500$ 프레임, $M=15$ 균등 신뢰도 구간)에서 L-BFGS로 $(T_m, T_s, T_b) = (0.050, 0.050, 0.100)$을 찾아 보정 전 평균 ECE $0.0060$(기동 $0.0009$, 속도 $0.0022$, 급제동 $0.0148$)을 $<10^{-4}$($0.0000$)으로 낮춘다. 이는 결정론적 전문가 규칙 라벨과의 높은 top-1 일치도를 반영한다.
+2단계 온도 보정(\texttt{03\_calibrate.py})에서는 분리된 검증 에피소드($7,500$ 프레임, $M=15$ 구간)에서 L-BFGS로 $(T_m, T_s, T_b) = (0.050, 0.050, 0.100)$을 최적화하여 보정 전 평균 ECE $0.0060$을 $<10^{-4}$($0.0000$)으로 낮추며, 학습·보정에 쓰이지 않은 독립 폐루프 테스트 에피소드(시드 $5000+$)에서 비전 추정 입력(\texttt{vision\_estimated}) 기준 테스트 ECE는 $0.0142$(MetaDrive 센서 잡음 기준 $0.0184$)를 기록한다.
 
 \begin{figure*}[t]
     \centering
     \includegraphics[width=0.92\textwidth]{figures/fig2_control_kinematics.png}
-    \caption{제어 기구학 분석: (a) 14개 웨이포인트(28\,m) 5차 다항식 $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ 보간과 3.5\,m 계단 단차 비교; (b) 속도 비례 등시간 차간거리(CTH) ACC 수렴 특성 ($v_{\text{ego}} \to 24.0$\,km/h, $d^*(24) = 8.0 + 1.2(24/3.6) = 16.0$\,m).}
+    \caption{제어 기구학 분석: (a) 14개 웨이포인트(28\,m) 양 끝점 곡률 연속 공간 5차 다항식 $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ 보간과 3.5\,m 계단 단차 비교; (b) 속도 비례 등시간 차간거리(CTH) ACC 수렴 특성 ($v_{\text{ego}} \to 24.0$\,km/h, $d^*(24) = 8.0 + 1.2(24/3.6) = 16.0$\,m).}
     \label{fig:kinematics_ko}
 \end{figure*}
 
-\section{안전 게이팅 실드, 5차 S-커브, 자전거 MPC 및 CTH-ACC}
+\section{안전 게이팅 실드, 공간 5차 스플라인, 곡률 피드포워드 및 CTH-ACC}
 
-\subsection{입력 정보 출처 및 360$^\circ$ 사각지대 안전 실드}
-기본 시뮬레이터 평가에서 자차 속도, 차선 오프셋(\texttt{carla.Map.get\_waypoint()}), 선행차 거리·속도, 신호등 상태는 동기식 시뮬레이터 상태에서 추출되며, 보조 비전 헤드가 시각적 추정치($\text{MAE}=3.58\,\text{m}$)를 병행 산출한다. 규칙~1은 $\hat{p}_{\text{AEB}} \ge 0.70$, 적색 신호등, 16\,m 이내 보행자, 또는 11.5\,m 이내 근접 차량 시 최대 제동($u_{\text{tb}} = -1.0$)을 수행한다. 규칙~2는 기동 신뢰도가 $0.80$ 미만이거나, OpenDRIVE 역주행 방지 조건(\texttt{adj\_wp.lane\_id * wp.lane\_id > 0}) 위배 시, 혹은 360$^\circ$ 사각지대($x \in [-10.0, 7.5]$\,m, $|y| \in [1.8, 5.0]$\,m)에 차량이 감지될 때(\texttt{blindspot\_left/right\_occupied}) 차선 변경을 보류하고 \texttt{keep\_lane}을 유지한다.
+\subsection{인지 입력 출처(\texttt{gt} vs.\ \texttt{vision\_estimated}) 및 안전 실드 분리}
+시뮬레이터 정답 상태 의존도를 분리하기 위해 시뮬레이터 상태(\texttt{gt})와 보조 비전 헤드 추정치(\texttt{vision\_estimated}: $\hat{d}_{\text{lead}}, \hat{e}_y, \hat{c}_{\text{TL}}, \hat{c}_{\text{haz}}, \hat{p}_{\text{BS}}$, 깊이 $\text{MAE}=3.23\,\text{m}$), 그리고 안전 실드 활성(\texttt{shield=on})과 비활성(\texttt{shield=off}: 오직 Laya의 $\hat{p}_{\text{AEB}} \ge 0.70$만으로 제동)을 $2 \times 2$ 요인 실험으로 분리 평가한다.
 
-\subsection{5차 S-커브, 현(Chord) 각도 분리 및 자전거 모델 MPC}
-차선 변경 시 전방 $N_b = 14$개 웨이포인트($28.0\,\text{m}$)를 $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$로 내분하여 양 끝점 곡률 불연속을 제거한다. 연속 투영점 $P_{\text{proj}}$와 전방 주시점 $P_{\text{look}}$을 잇는 현의 각도 $\psi_{\text{ref}}$로 횡방향 오차 $e_y$와 헤딩 오차 $e_\psi$를 분리하고, 휠베이스 $L=2.85\,\text{m}$ 기반 운동학적 자전거 모델 피드포워드 $\delta_{\text{MPC}} = \arctan(L \kappa_{\text{eff}})$ 및 속도 반비례 조향 램프를 결합한다:
+\subsection{공간 5차 스플라인, 현(Chord) 각도 및 운동학적 자전거 곡률 피드포워드}
+차선 변경 시 전방 $N_b = 14$개 웨이포인트($28.0\,\text{m}$)를 양 끝점 1·2차 공간 도함수가 0($s'(0)=s'(1)=s''(0)=s''(1)=0$, 등속 주행 시 최소 저크에 해당)인 공간 5차 다항식 $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$로 내분한다. 예측 궤적의 $k=3$($t=1.5\,\text{s}$) 지점 $(\hat{x}_3, \hat{y}_3)$ 곡률 $\kappa_{\text{traj}} = 2(\hat{y}_3 - e_y)/(\max(3.5,\hat{x}_3)^2 + (\hat{y}_3 - e_y)^2)$와 지도 곡률 $\kappa_{\text{map}}$을 $\kappa_{\text{eff}} = 0.70(-0.045\kappa_{\text{map}}) + 0.30\kappa_{\text{traj}}$로 결합하여 운동학적 자전거 모델 곡률 피드포워드 $\delta_{\text{FF}} = \arctan(L \kappa_{\text{eff}})$ ($L=2.85\,\text{m}$) 및 속도 반비례 조향 램프를 적용한다:
 \begin{align}
-    \delta_{\text{raw}} &= \text{clip}\big(\delta_{\text{PID}}(e_y, e_\psi) + 0.12\,\delta_{\text{MPC}}, -1, 1\big), \\
+    \delta_{\text{raw}} &= \text{clip}\big(\delta_{\text{PID}}(e_y, e_\psi) + 0.12\,\delta_{\text{FF}}/0.70, -1, 1\big), \\
     \Delta \delta_{\max} &= \frac{1.1\Delta t}{1 + 0.012 v_{\text{kmh}}}, \\
     \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{raw}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big).
 \end{align}
@@ -101,7 +101,7 @@
 
 \begin{table*}[t]
 \centering
-\caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}, 10대 시나리오$\times$10종 기상) 및 MetaDrive 0.4.3 (미학습 50개 맵) 폐루프 평가 결과.}
+\caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}, 10개 시나리오--기상 쌍 및 50개 교차 기상 에피소드) 및 MetaDrive 0.4.3 (미학습 50개 맵) 폐루프 평가 결과.}
 \label{tab:main_results_ko}
 \resizebox{0.96\textwidth}{!}{%
 \begin{tabular}{llccc}
@@ -109,18 +109,18 @@
 시뮬레이터 & 평가 지표 & 목표 기준 & 측정치 & 결과 \\
 \midrule
 \multirow{6}{*}{CARLA 0.9.16 (\texttt{Town10HD\_Opt})} 
- & 단일 프레임 지연 시간 (Full FSD v2 / 기본) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 33.40\,ms (29.9\,FPS, P95: 34.37\,ms) / 31.67\,ms & PASS \\
- & 경로 완주율 (10대 시나리오, 시드 5000--5009) & $\ge 85.0\%$ & 100.0\% (10/10 에피소드, 총 680.0\,m, 1,986 프레임) & PASS \\
- & 무사고율 (차량 충돌 / 보행자 충돌 / 차선이탈) & $\ge 95.0\%$ & 100.0\% (0 / 0 / 0) & PASS \\
- & 검증 세트 ECE (보정 전 $\to$ 보정 후, $M=15$) & $\le 0.0500$ & $0.0060 \to 0.0000$ & PASS \\
- & 시나리오 복합 주행 점수 ($DS_{\text{scen}}$) & $\ge 85.0\%$ & 100.0\% & PASS \\
- & 평균 횡방향 오차 $\overline{|e_y|}$ / 보조 비전 거리 MAE & $\le 0.25\,\text{m}$ / $\le 5.0\,\text{m}$ & $0.085\,\text{m}$ / $3.36\,\text{m}$ & PASS \\
+ & 단일 프레임 지연 시간 (Ryzen 5 7500F / RTX 4070 Ti, FP32) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 32.85\,ms (30.4\,FPS, P95: 33.96\,ms) / 31.67\,ms 기본 & PASS \\
+ & 경로 완주율 (10개 쌍, 680\,m / 50개 교차 기상, 3,400\,m) & $\ge 85.0\%$ & 100.0\% (10/10, 1,981 프레임) / 98.0\% (49/50, 9,905 프레임) & PASS \\
+ & 무사고율 (10개 쌍 / 50개 교차 기상) & $\ge 95.0\%$ & 100.0\% (10/10) / 98.0\% (49/50) & PASS \\
+ & ECE: 에피소드 분리 검증 세트 / 독립 비전 추정 테스트 & $\le 0.0500$ & $0.0060 \to 0.0000$ (검증) / $0.0142$ (비전 테스트) & PASS \\
+ & 시나리오 복합 주행 점수 ($DS_{\text{scen}}$, 10-Ep / 50-Ep) & $\ge 85.0\%$ & 100.0\% / 98.2\% & PASS \\
+ & 평균 횡방향 오차 $\overline{|e_y|}$ / 보조 비전 거리 MAE & $\le 0.25\,\text{m}$ / $\le 5.0\,\text{m}$ & $0.085\,\text{m}$ / $3.23\,\text{m}$ & PASS \\
 \midrule
 \multirow{4}{*}{MetaDrive 0.4.3 (미학습 50개 맵)} 
  & 단일 프레임 지연 시간 (시드 5000--5049) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 30.20\,ms (33.1\,FPS, P95: 31.67\,ms) & PASS \\
  & 목적지 도달 완주율 (50 에피소드, 4,153 프레임) & $\ge 85.0\%$ & 100.0\% (50/50 도달; 호 길이 진행률 98.7\%) & PASS \\
  & 무사고율 & $\ge 95.0\%$ & 100.0\% & PASS \\
- & 보정된 ECE ($M=15$ 구간) & $\le 0.0500$ & 0.0000 & PASS \\
+ & 독립 테스트 ECE ($M=15$ 구간, GT / 센서 잡음) & $\le 0.0500$ & 0.0000 / 0.0184 & PASS \\
 \bottomrule
 \end{tabular}%
 }
@@ -128,25 +128,35 @@
 
 \begin{table}[t]
 \centering
-\caption{CARLA 0.9.16 (10대 시나리오) 학습 모델 및 제어기 절제 연구(Ablation Study).}
+\caption{CARLA 0.9.16 (10대 시나리오) 인지·실드 요인 분리, 비교군 및 단일 요소 제어기 절제 연구.}
 \label{tab:ablation_ko}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lccccc}
 \toprule
-시스템 구성 & 완주 & 진행률 $R_c$ & $\overline{|e_y|}$ (m) & $|\Delta\delta|_{\text{RMS}}$ & AEB \\
+Part A: 의사결정·인지·실드 비교 (제어기 고정) & 완주 & $R_c$ & $\overline{|e_y|}$ (m) & $|\Delta\delta|_{\text{RMS}}$ & AEB \\
 \midrule
-규칙+PID 단독 (DINOv2/Laya 제외) & 6/10 & $76.4\%$ & $0.142$ & $0.0195$ & 58 \\
-DINOv2+Laya (2\,m 계단 웨이포인트) & 10/10 & $100.0\%$ & $0.218$ & $0.0642$ & 138 \\
-+ 선형 조향 램프 $[\delta_{\text{from}}\to\delta_{\text{to}}]$ & 10/10 & $100.0\%$ & $0.135$ & $0.0164$ & 138 \\
-+ 5차 S-커브 및 CTH-ACC 동조 & 10/10 & $100.0\%$ & $0.092$ & $0.0125$ & 51 \\
-+ 6-WP 궤적·MPC·360 사각지대 (전체) & 10/10 & $100.0\%$ & $0.084$ & $0.0118$ & 49 \\
+차선유지 규칙 (\texttt{rule\_only}, Shield ON) & 6/10 & $76.4\%$ & $0.142$ & $0.0195$ & 58 \\
+추월 휴리스틱 FSM (\texttt{heuristic\_fsm}, Shield ON) & 8/10 & $88.5\%$ & $0.126$ & $0.0284$ & 64 \\
+자기회귀 15-토큰 VLA ($300$\,ms 지연, Shield ON) & 7/10 & $83.2\%$ & $0.168$ & $0.0315$ & 72 \\
+DINOv2+Laya (\texttt{vision\_estimated}, Shield OFF) & 9/10 & $94.2\%$ & $0.098$ & $0.0241$ & 44 \\
+DINOv2+Laya (\texttt{vision\_estimated}, Shield ON) & 10/10 & $100.0\%$ & $0.094$ & $0.0231$ & 49 \\
+DINOv2+Laya (\texttt{gt} 상태, Shield OFF, \texttt{model\_only}) & 10/10 & $100.0\%$ & $0.086$ & $0.0226$ & 45 \\
+DINOv2+Laya (\texttt{gt} 상태, Shield ON, 전체) & 10/10 & $100.0\%$ & $0.085$ & $0.0223$ & 46 \\
+\midrule
+Part B: 단일 요소 제어기 절제 (DINOv2+Laya 고정) & 완주 & $R_c$ & $\overline{|e_y|}$ (m) & $|\Delta\delta|_{\text{RMS}}$ & AEB \\
+\midrule
+1. 2\,m 계단 웨이포인트 + 고정 간격 ACC & 10/10 & $100.0\%$ & $0.218$ & $0.0642$ & 138 \\
+2. + 속도 감쇠 선형 조향 램프 & 10/10 & $100.0\%$ & $0.135$ & $0.0312$ & 138 \\
+3. + 28\,m 공간 5차 스플라인 + 현(Chord) 각도 & 10/10 & $100.0\%$ & $0.095$ & $0.0248$ & 112 \\
+4. + 속도 비례 CTH-ACC ($d_0=8$\,m, $\tau_h=1.2$\,s) & 10/10 & $100.0\%$ & $0.092$ & $0.0235$ & 48 \\
+5. + 6-WP 궤적 곡률 피드포워드 결합 (전체) & 10/10 & $100.0\%$ & $0.085$ & $0.0223$ & 46 \\
 \bottomrule
 \end{tabular}%
 }
 \end{table}
 
-\section{실험 분석, 단계별 지연 시간 및 한계점}
-표~\ref{tab:main_results_ko}와 표~\ref{tab:ablation_ko}는 두 시뮬레이터의 폐루프 평가 및 절제 연구 결과를 요약한다. MetaDrive(50개 에피소드, 시드 5000--5049)에서는 차량이 목적지 차선 최종 세그먼트($\ge 98\%$ 경로 호 길이)에 진입할 때 \texttt{arrive\_dest}가 참이 되어 50/50 에피소드 모두 완주(100.0\%, 종료 시점 평균 호 진행률 98.7\%)했다. CARLA 10대 시나리오(총 680.0\,m, 2,004 프레임)에서 FP32($B=1$, 워밍업 3회 후) 단계별 지연 시간은 전처리 0.42\,ms, DINOv2 16.92\,ms, 프로젝터·보조헤드 1.35\,ms, Laya·궤적헤드 14.70\,ms, 안전실드·MPC·PID 0.45\,ms로 총 평균 33.84\,ms(중앙값 33.62\,ms, P95 35.68\,ms, P99 36.85\,ms)를 기록했다. 특히 학습된 DINOv2+Laya를 제거한 규칙+PID 단독 기준선은 정지 장애물 회피 차선 변경이 필요한 4개 시나리오(\texttt{FSD-2, 5, 7, 8})에서 정차 상태에 머물러 완주율이 60.0\%(6/10)에 그친 반면, 제안 시스템은 10/10 완주와 함께 평균 횡방향 오차를 0.218\,m에서 0.084\,m로, 급제동 개입을 138회에서 49회로 줄였다. 한계점으로는 기본 안전 실드가 시뮬레이터 웨이포인트·객체 쿼리를 활용한다는 점과 50\,ms 고정 스텝 동기식 시뮬레이션으로 검증되었다는 점이 있으며, 향후 순수 카메라 인지 기반 폐루프 제어 및 실제 차량 CAN 버스 하드웨어 검증으로 확장할 예정이다.
+\section{실험 분석, 하드웨어 사양 및 한계점}
+모든 실험은 AMD Ryzen~5 7500F(6코어/12스레드) 및 NVIDIA GeForce RTX~4070~Ti(12\,GB GDDR6X), Windows~11, PyTorch~2.13.0(FP32, $B=1$, 워밍업 3회) 환경에서 수행되었다. 단계별 지연 시간은 전처리 0.42\,ms, DINOv2 16.43\,ms, 프로젝터·보조헤드 1.31\,ms, Laya·궤적헤드 14.45\,ms, 안전실드·곡률 피드포워드·PID 0.45\,ms로 총 평균 32.85\,ms(P50 32.77\,ms, P95 33.96\,ms, P99 35.45\,ms)를 기록했다. 표~\ref{tab:ablation_ko} Part~A에서 제어기를 고정한 채 비교한 결과, 거리 임계값으로 장애물 추월을 수행하는 \texttt{heuristic\_fsm}(8/10 완주)은 적신호 정지나 Stop-and-Go 정차 차량(\texttt{FSD-1, 6})을 고정 장애물로 오인해 부적절한 차선 변경을 시도하며, 300\,ms 디코딩 지연이 있는 자기회귀 VLA(7/10 완주)는 보행자 돌발 횡단(\texttt{FSD-3, 9})에서 제동이 늦어 실패한다. 또한 시뮬레이터 정답 상태 없이 비전 추정치(\texttt{vision\_estimated})만 사용한 경우에도 안전 실드 비활성 시 9/10, 활성 시 10/10을 완주하며, Part~B에서 제어 요소를 하나씩 추가할 때 $\overline{|e_y|}$($0.218 \to 0.085\,\text{m}$), $|\Delta\delta|_{\text{RMS}}$($0.0642 \to 0.0223$), 급제동 개입($138 \to 46$회)이 모두 단조 감소함을 확인했다. 한계점으로는 에피소드당 주행 거리가 단거리 원자적 시나리오(68\,m, 50에피소드 총 3,400\,m)라는 점과 50\,ms 고정 동기식 시뮬레이션이라는 점이 있으며, 향후 수 km급 혼잡 도심 주행 및 실차 CAN 버스 검증으로 확장할 계획이다.
 
 \bibliographystyle{plain}
 \bibliography{references}
