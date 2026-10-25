@@ -155,3 +155,19 @@ Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, `Town10HD_Opt`, `GlobalRoutePl
 | **Route Completion Rate** | **$\ge 85.0\%$** | **100.0% (Mean progress 98.7%)** | **PASS** |
 | **Crash-Free Rate** | **$\ge 95.0\%$** | **100.0% (`crash=0`, `out_of_road=0`)** | **PASS** |
 | **Expected Calibration Error (ECE)** | **$\le 0.0500$** | **0.0000** | **PASS** |
+
+---
+
+## 6. Author & Citation
+
+* **Author:** **Wick-Lim** ([wicklim90@gmail.com](mailto:wicklim90@gmail.com))
+* **GitHub:** [https://github.com/Wick-Lim/AutonomousVehicle](https://github.com/Wick-Lim/AutonomousVehicle)
+
+```bibtex
+@article{wicklim2026autonomousvehicle,
+  title   = {Sub-40ms Non-Autoregressive Vision-Language Autonomous Driving via Spatial DINOv2-Laya Alignment and Quintic S-Curve Safety Control},
+  author  = {Wick-Lim},
+  year    = {2026},
+  url     = {https://github.com/Wick-Lim/AutonomousVehicle}
+}
+```

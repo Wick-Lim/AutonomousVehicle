@@ -156,3 +156,19 @@ AutonomousVehicle/
 | **주행 완주율 (Route Completion Rate)** | **85.0% 이상** | **100.0% (평균 경로 진행률 98.7%)** | **PASS** |
 | **무사고율 (Crash-Free Rate)** | **95.0% 이상** | **100.0% (`crash=0`, `out_of_road=0`)** | **PASS** |
 | **신뢰도 보정 오차 (ECE)** | **0.0500 이하** | **0.0000** | **PASS** |
+
+---
+
+## 6. 저자 및 인용 (Author & Citation)
+
+* **저자 (Author):** **Wick-Lim** ([wicklim90@gmail.com](mailto:wicklim90@gmail.com))
+* **GitHub:** [https://github.com/Wick-Lim/AutonomousVehicle](https://github.com/Wick-Lim/AutonomousVehicle)
+
+```bibtex
+@article{wicklim2026autonomousvehicle,
+  title   = {Sub-40ms Non-Autoregressive Vision-Language Autonomous Driving via Spatial DINOv2-Laya Alignment and Quintic S-Curve Safety Control},
+  author  = {Wick-Lim},
+  year    = {2026},
+  url     = {https://github.com/Wick-Lim/AutonomousVehicle}
+}
+```
