@@ -53,6 +53,19 @@ def compute_aux_and_traj_losses(
         dtype=torch.float32,
         device=device,
     )
+    gt_ped = torch.tensor(
+        [float(t.get("pedestrian_distance_m", 100.0)) for t in telemetries],
+        dtype=torch.float32,
+        device=device,
+    )
+    gt_rr_mps = torch.tensor(
+        [
+            (float(t.get("lead_speed_kmh", 35.0)) - float(t.get("speed_kmh", 35.0))) / 3.6
+            for t in telemetries
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
     gt_off = torch.tensor(
         [float(t.get("lane_offset_m", 0.0)) for t in telemetries],
         dtype=torch.float32,
@@ -77,8 +90,21 @@ def compute_aux_and_traj_losses(
         device=device,
     )
 
+    loss_ped = (
+        0.05 * F.smooth_l1_loss(aux["pred_ped_distance_m"], gt_ped)
+        if "pred_ped_distance_m" in aux
+        else torch.tensor(0.0, device=device)
+    )
+    loss_rr = (
+        0.10 * F.smooth_l1_loss(aux["pred_range_rate_mps"], gt_rr_mps)
+        if "pred_range_rate_mps" in aux
+        else torch.tensor(0.0, device=device)
+    )
+
     loss_aux = (
         0.05 * F.smooth_l1_loss(aux["pred_lead_distance_m"], gt_lead)
+        + loss_ped
+        + loss_rr
         + F.smooth_l1_loss(aux["pred_lane_offset_m"], gt_off)
         + 0.5 * F.cross_entropy(aux["traffic_light_logits"], gt_tl)
         + 0.5 * F.cross_entropy(aux["hazard_logits"], gt_haz)

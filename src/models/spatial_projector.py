@@ -214,11 +214,17 @@ class SpatialProjector(nn.Module):
         """Run auxiliary visual perception readout from the 4x9 spatial tokens."""
         return self.aux_head(visual_tokens, telemetries=telemetries)
 
-    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
-        """Transform DINOv2 patch tokens into 36 spatial-temporal visual tokens for Laya.
+    def forward(
+        self,
+        patch_tokens: torch.Tensor,
+        elapsed_steps: int = 1,
+    ) -> torch.Tensor:
+        r"""Transform DINOv2 patch tokens into 36 spatial-temporal visual tokens for Laya.
 
         Args:
             patch_tokens: (B, 392, 768) or (B, 768, 14, 28) tensor.
+            elapsed_steps: Number of elapsed 50ms control ticks since previous observed frame
+                (\Delta n_t >= 1) for step-normalized temporal residual \Delta V_t / \Delta n_t.
 
         Returns:
             visual_tokens: (B, 36, 1024) tensor ordered row-by-row over the 4x9 grid.
@@ -250,14 +256,15 @@ class SpatialProjector(nn.Module):
         # Project to Laya hidden dimension: (B, 36, 1024)
         visual_tokens = self.mlp(tokens_36)
 
-        # Fuse temporal motion residual (\Delta V_t = V_t - V_{t-1}) during sequential streaming
+        # Fuse step-normalized temporal motion residual (\Delta V_t = (V_t - V_{t-\Delta n_t}) / \Delta n_t)
         if not self.training and visual_tokens.shape[0] == 1:
             if (
                 self._prev_tokens is not None
                 and self._prev_tokens.shape == visual_tokens.shape
                 and self._prev_tokens.device == visual_tokens.device
             ):
-                delta_v = visual_tokens - self._prev_tokens
+                step_scale = float(max(1, int(elapsed_steps)))
+                delta_v = (visual_tokens - self._prev_tokens) / step_scale
                 self._temporal_delta_norm = float(
                     delta_v.detach().norm(dim=-1).mean().item()
                 )

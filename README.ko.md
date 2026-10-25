@@ -6,7 +6,7 @@
 
 > *Sub-40ms Non-Autoregressive Autonomous Driving in CARLA 0.9.16 & MetaDrive powered by DINOv2 & Laya*
 
-**AutonomousVehicle**은 3D 자율주행 시뮬레이터(**CARLA 0.9.16** 및 **MetaDrive 0.4.3**) 환경에서 기하학적 공간 인지 비전 백본(**DINOv2**, `facebook/dinov2-base`)과 비자기회귀(Non-Autoregressive) 초저지연 의사결정 모델(**Laya**, `convaiinnovations/laya`)을 결합하여 **단 한 번의 Forward Pass(40ms 이하, 31+ FPS)**로 실시간 폐루프(Closed-loop) 자율주행을 수행하는 오픈소스 R&D 프로젝트입니다.
+**AutonomousVehicle**은 3D 자율주행 시뮬레이터(**CARLA 0.9.16** 및 **MetaDrive 0.4.3**) 환경에서 동결된 자기지도 공간 인지 비전 백본(**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$)과 동결된 비자기회귀(Non-Autoregressive) 의사결정 트랜스포머(**Laya**, `convaiinnovations/laya`, $395.21\text{M}$)를 $4 \times 9$ 시공간 어댑터($4.23\text{M}$ 파라미터)로 결합하고, HD 맵 라우팅, 규칙 기반 안전 실드, 운동학적 경로 추종 제어기를 통합한 실시간 하이브리드 폐루프 자율주행 R&D 프로젝트입니다. **단 한 번의 동기화된 순전파+제어 패스($32.85\text{ ms}$, $30.4\text{ FPS}$; 기본 $31.67\text{ ms}$)** 안에 **14-웨이포인트($28\text{ m}$) 공간 5차 스플라인 전이**, **5-스텝($0.25\text{ s}$) 최소제곱(OLS) 선행차 속도 추정**, **선행차·보행자 분리형 거리 추정 헤드**, **속도 비례 등시간 차간거리(CTH) ACC**를 실행합니다.
 
 ---
 
@@ -17,7 +17,7 @@
   <br/>
   🎥 <b><a href="assets/driving_demo_carla_smooth.mp4">고화질 원본 MP4 영상 보기 (assets/driving_demo_carla_smooth.mp4 — 10대 도심 시나리오 × 10종 기상·야간)</a></b>
   <br/>
-  <sub>33.84 ms / 29.5 FPS (Full FSD v2) · 31.67 ms (기본) · 완주율 100.0% (10/10, 총 680.0 m, 2,004 프레임) · 평균 횡방향 추적 오차 0.084 m</sub>
+  <sub>32.85 ms / 30.4 FPS (신경망 32.40 ms + 제어기 0.45 ms) · 31.67 ms (기본) · 액터 쿼리 없는 <code>vision_estimated</code> 모드 10/10 쌍 및 47/50 (94.0%) 교차 기상 완주 · 평균 횡방향 오차 0.094 m (Vis) / 0.085 m (GT)</sub>
 </p>
 
 ---
@@ -73,8 +73,11 @@ pip install -r requirements.txt
 ### 3.2. CARLA 0.9.16 도심 FSD 자율주행 실행 (`--simulator carla`)
 `CarlaUE4.exe` 실행 후 실시간 3D HUD 렌더링 및 MP4 주행 영상 녹화를 수행합니다:
 ```bash
-# CARLA 0.9.16 (Town10HD_Opt) 10대 도심 FSD 시나리오 × 10종 기상 실시간 주행 및 영상 저장
-python scripts/04_evaluate_sim.py --simulator carla --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
+# CARLA 0.9.16 (Town10HD_Opt) 액터 쿼리 없는 vision_estimated 모드 실시간 주행 및 영상 저장 (--perception-mode gt 선택 가능)
+python scripts/04_evaluate_sim.py --simulator carla --perception-mode vision_estimated --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
+
+# v8 수식·모듈 검증 단위 테스트 실행 (5-스텝 OLS 상대속도, 보행자 전용 거리 헤드, ΔV_t/Δn_t, AEB 사건 묶음)
+python tests/test_v8_verification.py
 ```
 
 ### 3.3. 4단계 전체 학습·보정·평가 파이프라인 실행
@@ -82,14 +85,14 @@ python scripts/04_evaluate_sim.py --simulator carla --episodes 10 --render --sav
 # 1. 전문가 주행 데이터 자동 수집
 python scripts/01_collect_data.py --num-frames 50000
 
-# 2. 2D Spatial Projector 어댑터 집중 학습 (DINOv2 & Laya 동결)
+# 2. 4.23M SpatialProjector + AuxPerceptionHead + 판독·궤적 헤드 공동 학습 (DINOv2 & Laya 동결)
 python scripts/02_train_projector.py --epochs 15 --batch-size 32
 
-# 3. 검증 데이터셋 기반 Temperature Scaling 확률 보정 (ECE 최소화)
+# 3. 에피소드 블록 분할 검증 데이터셋 기반 Temperature Scaling 확률 보정
 python scripts/03_calibrate.py
 
-# 4. 실시간 폐루프 주행 및 KPI 평가
-python scripts/04_evaluate_sim.py --episodes 50
+# 4. 미학습 50개 맵 / 교차 기상 에피소드 실시간 폐루프 평가
+python scripts/04_evaluate_sim.py --perception-mode vision_estimated --episodes 50
 ```
 
 ---
@@ -100,29 +103,31 @@ python scripts/04_evaluate_sim.py --episodes 50
 AutonomousVehicle/
 ├── assets/
 │   ├── driving_demo_carla_smooth.gif # GitHub README 인라인 자동 재생 데모 GIF
-│   └── driving_demo_carla_smooth.mp4 # CARLA 0.9.16 도심 5대 FSD 시나리오 원본 MP4 영상
+│   └── driving_demo_carla_smooth.mp4 # CARLA 0.9.16 도심 FSD 시나리오 원본 MP4 영상
 ├── paper/
 │   ├── main.tex                      # 영문 LaTeX 연구 논문 소스 (IEEE/CVPR 양식)
 │   ├── main_ko.tex                   # 국문 LaTeX 연구 논문 소스
-│   ├── references.bib                # 참고문헌 BibTeX 데이터베이스
+│   ├── references.bib                # 참고문헌 BibTeX 데이터베이스 (42편)
 │   └── figures/                      # 논문용 고해상도 실험 결과 및 궤적 분석 Figure
 ├── configs/
 │   └── default.yaml                  # 카메라 해상도, 그리드 크기(4x9), 게이팅 임계값 설정
 ├── checkpoints/                      # 학습된 Spatial Projector 가중치 및 평가 지표 JSON
 ├── src/
 │   ├── env/
-│   │   ├── carla_wrapper.py          # CARLA 0.9.16 동기 모드(20Hz), 5차 S-커브 궤적, 3D AR HUD
+│   │   ├── carla_wrapper.py          # CARLA 0.9.16 동기 모드(20Hz), 14-노드 5차 스플라인, 3D AR HUD
 │   │   ├── metadrive_wrapper.py      # MetaDrive 환경 래퍼 및 텔레메트리 추출
 │   │   └── expert_labeler.py         # 전문가 액션을 Laya 정답 라벨로 변환하는 규칙
 │   ├── models/
-│   │   ├── dino_backbone.py          # DINOv2 로드 및 패치 특징 추출
-│   │   ├── spatial_projector.py      # 4x9 Adaptive Pooling + 2D Pos Embed + MLP
-│   │   └── laya_pilot.py             # 시각 토큰 + 텍스트 토큰 결합 및 Laya 단일 패스 추론
+│   │   ├── dino_backbone.py          # 동결 DINOv2 ViT-B/14 로드 및 패치 특징 추출 (86.58M)
+│   │   ├── spatial_projector.py      # 4x9 Adaptive Pooling + ΔV_t/Δn_t + 분리형 AuxPerceptionHead
+│   │   └── laya_pilot.py             # 동결 Laya (395.21M) + 이산 및 6-WP 궤적 헤드
 │   ├── control/
-│   │   └── shield_pid.py             # 안전 게이팅 실드, 선형 조향 램프, ACC 속도 동조 PID
+│   │   └── shield_pid.py             # 안전 게이팅 실드, 자전거 곡률 피드포워드, 조향 램프, CTH-ACC
 │   └── utils/
-│       ├── dataset.py                # PyTorch Dataset & DataLoader
-│       └── calibration.py            # Temperature Scaling (ECE 계산 및 최적화)
+│       ├── dataset.py                # 에피소드 블록 분할 PyTorch Dataset & DataLoader
+│       └── calibration.py            # Temperature Scaling (ECE 계산 및 L-BFGS 최적화)
+├── tests/
+│   └── test_v8_verification.py       # 5-스텝 OLS, 보행자 전용 거리 헤드, ΔV_t/Δn_t, AEB 사건 단위 테스트
 ├── scripts/                          # 데이터 수집, 학습, 보정, 폐루프 평가 스크립트 (01~04)
 ├── README.md                         # 영문 메인 문서 (English README)
 └── README.ko.md                      # 국문 문서 (Korean README)
@@ -130,38 +135,28 @@ AutonomousVehicle/
 
 ---
 
-## 5. 폐루프 주행 벤치마크 결과 (Real Simulators & HuggingFace Models)
+## 5. 폐루프 주행 벤치마크 결과 (`vision_estimated` vs. `gt` 분리 표기)
 
-### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 도심 10대 FSD v2 시나리오 × 10종 기상 벤치마크 (`2,004` 프레임, `680.0 m`)
-- **검증된 10대 도심 FSD 시나리오 및 10종 기상·조명 프리셋 (시드 `5000..5009`):**
-  1. `FSD-1_Intersection_Turn` (`ClearNoon`): 도심 신호등 교차로 적신호 정지선 정차 후 녹색 신호 출발·주행
-  2. `FSD-2_Dynamic_Overtake_Left` (`CloudyNoon`): 전방 정차 차량 인지 및 28m 최소 저크 5차 S-커브 좌측 차선 변경 추월
-  3. `FSD-3_Pedestrian_Crosswalk_AEB` (`WetNoon`): 횡단보도 보행자 돌발 출현 인지 및 Rule 1 긴급 제동(AEB) 정차
-  4. `FSD-4_Urban_ACC_Follow` (`SoftRainNoon`): 속도 비례 등시간 차간거리(CTH) ACC ($d^*(24)=16.0\text{ m}$, $24\text{ km/h}$) 동조 추종
-  5. `FSD-5_MultiBlock_Overtake_Right` (`ClearSunset`): 다차선 도심 구간 우측 차선 5차 S-커브 회피 추월
-  6. `FSD-6_StopAndGo_LeadBrake` (`WetCloudyNoon`): 전방 주행 중이던 리드 차량의 급정거($0\text{ km/h}$) 대응 및 재출발 Stop-and-Go
-  7. `FSD-7_BlindSpot_Hold_Then_Overtake` (`MidRainyNoon`): 전방 장애물 + 좌측 사각지대($x \in [-10, 7.5]\text{ m}$) 추월 차량 감지 시 360° 인터록으로 차선 변경 보류 후 안전 확보 시 추월
-  8. `FSD-8_ConstructionZone_RightBypass` (`WetSunset`): 도로 공사 구간 연속 장애물 우측 차선 5차 S-커브 우회
-  9. `FSD-9_Night_Pedestrian_AEB` (`ClearNight`): 야간 전조등(`Position | LowBeam`) 점등 주행 및 야간 횡단보도 보행자 AEB 정차
-  10. `FSD-10_HeavyRain_Intersection_ACC` (`HardRainNoon`): 폭우 악천후 환경 교차로 및 코너 구간 ACC 추종 완주
+### 5.1. CARLA 0.9.16 (`Town10HD_Opt` 및 미학습 `Town03`) 폐루프 벤치마크
+시뮬레이터 액터 쿼리를 일절 사용하지 않는 `vision_estimated` 모드와 시뮬레이터 `gt` 상태를 분리 측정한 결과:
 
-| 평가 항목 (Metric) | 목표 수치 (Target) | 측정 결과 (Measured) | 상태 |
-| :--- | :--- | :--- | :---: |
-| **단일 프레임 추론 지연 시간 (Full FSD v2 / 기본)** | **40.0 ms 이하 ($\ge 25$ FPS)** | **33.84 ms (29.5 FPS, P95: 35.68 ms) / 31.67 ms** | **PASS** |
-| **주행 완주율 (10대 시나리오, 시드 5000–5009)** | **85.0% 이상** | **100.0% (10/10 시나리오, 총 680.0 m, 2,004 프레임; 규칙 단독 60.0% 대비)** | **PASS** |
-| **무사고율 (Crash-Free Rate)** | **95.0% 이상** | **100.0% (차량·보행자 충돌 0, 신호위반 0, 차선이탈 0)** | **PASS** |
-| **검증 세트 신뢰도 보정 오차 (보정 전 $\to$ 후, $M=15$ 구간)** | **0.0500 이하** | **0.0060 $\to$ 0.0000** | **PASS** |
-| **시나리오 복합 주행 점수 ($DS_{\text{scen}}$)** | **85.0% 이상** | **100.0%** | **PASS** |
-| **평균 횡방향 추적 오차 $\overline{|e_y|}$ 및 보조 비전 차간거리 MAE** | **0.25m 이하 / 5.0m 이하** | **0.084 m / 3.58 m MAE** | **PASS** |
+| 평가 항목 (Metric) | 목표 기준 | `vision_estimated` 모드 (액터 쿼리 없음) | 시뮬레이터 `gt` 상태 하이브리드 모드 | 상태 |
+| :--- | :--- | :--- | :--- | :---: |
+| **단일 프레임 지연 (`32.40 ms` 신경망 + `0.45 ms` 제어; `+6.40 ms` IPC 별도)** | **$\le 40.0\text{ ms}$** | **32.85 ms (30.4 FPS, P95: 33.96 ms)** | **32.85 ms (보조+궤적 생략 시 31.67 ms)** | **PASS** |
+| **`Town10HD_Opt`: 10개 쌍 (`680 m`) / 50개 교차 기상 (`3,400 m`)** | **$\ge 85.0\%$** | **100.0% (10/10) / 94.0% (47/50, 3-시드 $46.7\pm 0.6$)** | **100.0% (10/10) / 98.0% (49/50)** | **PASS** |
+| **`Town10HD_Opt`: 10개 다중 블록 도심 경로 (`200 m/ep`, `2,000 m`)** | **$\ge 85.0\%$** | **90.0% (9/10, $R_c=95.4\%$)** | **100.0% (10/10, $R_c=100.0\%$)** | **PASS** |
+| **미학습 `Town03` 맵 (`10 × 200 m` 회전교차로·경사로, `2,000 m`)** | **$\ge 80.0\%$** | **80.0% (8/10, $R_c=91.2\%$, $\overline{|e_y|}=0.112\text{ m}$)** | **90.0% (9/10, $R_c=96.5\%$)** | **PASS** |
+| **센서 스트레스 테스트: 10% 프레임 드롭 + 25% 패치 가림 (50-Ep)** | **$\ge 80.0\%$** | **88.0% (44/50, $\Delta V_t/\Delta n_t$ 및 래치 활성)** | **94.0% (47/50)** | **PASS** |
+| **교사 $\text{ECE}_{\text{mean}}$ / 물리적 위험 $\text{ECE}_{\text{phys}}$ / $\text{HCER}_{0.90,\text{AEB}}$ / 물리적 위험 $\text{FNR}_{\text{AEB}}$** | **$\le 0.0500$** | **0.0142 / 0.0318 / 0.45% (전체 1.12%) / 1/48건 (2.1%)** | **0.0000 / 0.0110 / 0.10% / 0/48건** | **PASS** |
+| **선행차 거리 MAE / 동시출현 보행자 MAE / 속도 떨림 RMS / $\overline{|e_y|}$** | **$\le 5.0\text{ m}$ / $\le 0.25\text{ m}$** | **3.23 m / 2.64 m / 1.84 km/h / 0.094 m** | **0.0 m / 0.0 m / 0.0 km/h / 0.085 m** | **PASS** |
 
-### 5.2. MetaDrive 0.4.3 고속도로·교차로 벤치마크 (미학습 50개 맵, `4,153` 프레임)
+### 5.2. MetaDrive 0.4.3 고속도로·교차로 벤치마크 ($\Delta t = 0.05\text{ s}$, 미학습 50개 맵, `20,765` 스텝 / `9,520 m`)
 
-| 평가 항목 (Metric) | 목표 수치 (Target) | 측정 결과 (Measured) | 상태 |
-| :--- | :--- | :--- | :---: |
-| **단일 프레임 추론 지연 시간 (시드 5000–5049)** | **40.0 ms 이하 ($\ge 25$ FPS)** | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **PASS** |
-| **목적지 도달 완주율 (`arrive_dest`, 호 진행률 $\ge 98\%$)** | **85.0% 이상** | **100.0% (50/50 에피소드 도달; 종료 시 평균 호 진행률 98.7%)** | **PASS** |
-| **무사고율 (Crash-Free Rate)** | **95.0% 이상** | **100.0% (`crash=0`, `out_of_road=0`)** | **PASS** |
-| **보정된 신뢰도 오차 (ECE, $M=15$ 구간)** | **0.0500 이하** | **0.0000** | **PASS** |
+| 평가 항목 (Metric) | 목표 기준 | `vision_estimated` 모드 | 시뮬레이터 `gt` 상태 하이브리드 모드 | 상태 |
+| :--- | :--- | :--- | :--- | :---: |
+| **단일 프레임 추론 지연 시간 ($\bar{v}=33.0\text{ km/h}$, 에피소드당 `415.3` 스텝 / `190.4 m`)** | **$\le 40.0\text{ ms}$** | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **30.20 ms (33.1 FPS)** | **PASS** |
+| **목적지 도달 완주율: 10-Ep (`4,153` 스텝, `1,904 m`) / 50-Ep (`20,765` 스텝, `9,520 m`)** | **$\ge 85.0\%$** | **100.0% (10/10) / 96.0% (48/50, CI $[86.3, 99.5]\%$)** | **100.0% (10/10) / 100.0% (50/50; 진행률 98.7%)** | **PASS** |
+| **독립 폐루프 테스트 $\text{ECE}_{\text{mean}}$ / NLL / Brier ($M=15$ 구간)** | **$\le 0.0500$** | **0.0184 / 0.096 / 0.031 (센서 잡음)** | **0.0000 / 0.041 / 0.012 (결정론적 GT)** | **PASS** |
 
 ---
 
@@ -172,7 +167,7 @@ AutonomousVehicle/
 
 ```bibtex
 @article{wicklim2026autonomousvehicle,
-  title   = {Sub-40ms Non-Autoregressive Vision-Language Autonomous Driving via Spatial DINOv2-Laya Alignment and Quintic S-Curve Safety Control},
+  title   = {Real-Time Closed-Loop Driving with Frozen DINOv2-Laya Spatial Pooling and Quintic Path Tracking},
   author  = {Wick-Lim},
   year    = {2026},
   url     = {https://github.com/Wick-Lim/AutonomousVehicle}

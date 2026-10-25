@@ -6,7 +6,7 @@
 
 > *Sub-40ms Non-Autoregressive Autonomous Driving in CARLA 0.9.16 & MetaDrive powered by DINOv2 & Laya*
 
-**AutonomousVehicle** is an open-source autonomous driving R&D framework that bridges a self-supervised geometric vision backbone (**DINOv2**, `facebook/dinov2-base`) with a non-autoregressive ultra-low-latency decision model (**Laya**, `convaiinnovations/laya`). Unlike autoregressive Vision-Language-Action (VLA) models that suffer from multi-token decoding latency ($>300\text{ ms}$), our system executes **closed-loop urban and highway driving in a single forward pass ($\le 31.7\text{ ms}$, $31.6\text{ FPS}$)** coupled with **Minimum-Jerk Quintic S-Curve trajectory interpolation** and **Constant-Time-Headway Adaptive Cruise Control (ACC)**.
+**AutonomousVehicle** is an open-source hybrid closed-loop autonomous driving R&D framework that couples a frozen self-supervised vision backbone (**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$) and a frozen non-autoregressive decision transformer (**Laya**, `convaiinnovations/laya`, $395.21\text{M}$) via a trainable $4 \times 9$ spatial-temporal adapter ($4.23\text{M}$ parameters) with HD-map routing, a rule-based safety shield, and kinematic path tracking. Unlike autoregressive Vision-Language-Action (VLA) models ($>300\text{ ms/frame}$), our stack executes **one synchronized forward+control pass in $32.85\text{ ms}$ ($30.4\text{ FPS}$; $31.67\text{ ms}$ base without aux/trajectory heads)** coupled with **14-node ($28\text{ m}$) Spatial Quintic Spline transitions**, **5-step ($0.25\text{ s}$) OLS lead-speed estimation**, **decoupled pedestrian depth estimation**, and **Constant-Time-Headway Adaptive Cruise Control (CTH-ACC)**.
 
 ---
 
@@ -17,7 +17,7 @@
   <br/>
   🎥 <b><a href="assets/driving_demo_carla_smooth.mp4">Watch Full HD MP4 Driving Video (assets/driving_demo_carla_smooth.mp4 — 10 Scenarios × 10 Weathers)</a></b>
   <br/>
-  <sub>33.84 ms / 29.5 FPS (Full FSD v2) · 31.67 ms (Base) · 100.0% Route Completion (10/10, 680.0 m, 2,004 frames) · 0.084 m Mean Cross-Track Error</sub>
+  <sub>32.85 ms / 30.4 FPS (Synchronized Neural 32.40 ms + Control 0.45 ms) · 31.67 ms (Base) · 10/10 Paired & 47/50 (94.0%) Cross-Weather Completion in Zero-Actor-Query <code>vision_estimated</code> Mode · 0.094 m Vis / 0.085 m GT Cross-Track Error</sub>
 </p>
 
 ---
@@ -73,7 +73,11 @@ pip install -r requirements.txt
 ### 3.2. Live CARLA 0.9.16 Urban FSD Evaluation (`--simulator carla`)
 With `CarlaUE4.exe` running on `127.0.0.1:2000` (`Town10HD_Opt`), run the 10-scenario, 10-weather Urban FSD benchmark with live 3D AR HUD rendering and MP4 recording:
 ```bash
-python scripts/04_evaluate_sim.py --simulator carla --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
+# Run CARLA 0.9.16 evaluation in zero-actor-query vision_estimated mode (or --perception-mode gt)
+python scripts/04_evaluate_sim.py --simulator carla --perception-mode vision_estimated --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
+
+# Run automated verification unit tests (5-step OLS range-rate, decoupled ped head, ΔV_t/Δn_t, AEB event grouping)
+python tests/test_v8_verification.py
 ```
 
 ### 3.3. Full 4-Stage Training, Calibration & Evaluation Pipeline
@@ -81,14 +85,14 @@ python scripts/04_evaluate_sim.py --simulator carla --episodes 10 --render --sav
 # 1. Automated expert driving dataset collection
 python scripts/01_collect_data.py --num-frames 50000
 
-# 2. Train the 2D SpatialProjector adapter (DINOv2 & Laya frozen)
+# 2. Train the 4.23M SpatialProjector + AuxPerceptionHead + Readout/Trajectory heads (DINOv2 & Laya frozen)
 python scripts/02_train_projector.py --epochs 15 --batch-size 32
 
-# 3. Post-hoc Temperature Scaling calibration (minimizing ECE)
+# 3. Post-hoc Temperature Scaling calibration on episode-block validation split
 python scripts/03_calibrate.py
 
-# 4. Closed-loop evaluation on unseen maps
-python scripts/04_evaluate_sim.py --episodes 50
+# 4. Closed-loop evaluation on 50 unseen maps / cross-weather episodes
+python scripts/04_evaluate_sim.py --perception-mode vision_estimated --episodes 50
 ```
 
 ---
@@ -99,29 +103,31 @@ python scripts/04_evaluate_sim.py --episodes 50
 AutonomousVehicle/
 ├── assets/
 │   ├── driving_demo_carla_smooth.gif # Auto-playing inline GIF for GitHub README
-│   └── driving_demo_carla_smooth.mp4 # Full HD MP4 video of CARLA 0.9.16 5 Urban FSD scenarios
+│   └── driving_demo_carla_smooth.mp4 # Full HD MP4 video of CARLA 0.9.16 Urban FSD scenarios
 ├── paper/
 │   ├── main.tex                      # English LaTeX research paper (IEEE/CVPR format)
 │   ├── main_ko.tex                   # Korean LaTeX research paper
-│   ├── references.bib                # BibTeX bibliography database
+│   ├── references.bib                # BibTeX bibliography database (42 references)
 │   └── figures/                      # High-resolution scenario & kinematic figures
 ├── configs/
 │   └── default.yaml                  # Camera resolution, 4x9 grid size, safety thresholds
 ├── checkpoints/                      # Trained SpatialProjector weights & evaluation JSON metrics
 ├── src/
 │   ├── env/
-│   │   ├── carla_wrapper.py          # CARLA 0.9.16 20Hz sync mode, Quintic S-curve, 3D AR HUD
+│   │   ├── carla_wrapper.py          # CARLA 0.9.16 20Hz sync mode, 14-node Quintic spline, 3D AR HUD
 │   │   ├── metadrive_wrapper.py      # MetaDrive wrapper & telemetry extraction
 │   │   └── expert_labeler.py         # Expert action to Laya target label mapping
 │   ├── models/
-│   │   ├── dino_backbone.py          # Frozen DINOv2 ViT-B/14 patch feature extractor
-│   │   ├── spatial_projector.py      # 4x9 AdaptiveAvgPool2d + 2D Pos Embed + MLP
-│   │   └── laya_pilot.py             # Multimodal token fusion & single-pass Laya inference
+│   │   ├── dino_backbone.py          # Frozen DINOv2 ViT-B/14 patch feature extractor (86.58M)
+│   │   ├── spatial_projector.py      # 4x9 AdaptiveAvgPool2d + ΔV_t/Δn_t + Decoupled AuxPerceptionHead
+│   │   └── laya_pilot.py             # Frozen Laya (395.21M) + discrete & 6-WP trajectory heads
 │   ├── control/
-│   │   └── shield_pid.py             # Calibrated Safety Shield, Linear Steering Ramp, ACC PID
+│   │   └── shield_pid.py             # Safety Shield, Bicycle Curvature FF, Linear Steer Ramp, CTH-ACC
 │   └── utils/
-│       ├── dataset.py                # PyTorch Dataset & DataLoader
-│       └── calibration.py            # Temperature Scaling (ECE computation & optimization)
+│       ├── dataset.py                # Episode-block PyTorch Dataset & DataLoader
+│       └── calibration.py            # Temperature Scaling (ECE computation & L-BFGS optimization)
+├── tests/
+│   └── test_v8_verification.py       # Unit tests for 5-step OLS, ped_dist_head, ΔV_t/Δn_t, and AEB events
 ├── scripts/                          # 01_collect_data .. 04_evaluate_sim pipeline scripts
 ├── README.md                         # Primary English README
 └── README.ko.md                      # Korean README
@@ -129,38 +135,28 @@ AutonomousVehicle/
 
 ---
 
-## 5. Closed-Loop Driving Benchmark Results
+## 5. Closed-Loop Driving Benchmark Results (`vision_estimated` vs. `gt` State Separated)
 
-### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 10-Scenario, 10-Weather Urban FSD v2 Benchmark (`2,004` frames, `680.0 m`)
-Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, `Town10HD_Opt`, `GlobalRoutePlanner` A\*)** across 10 urban Full Self-Driving (FSD) scenarios and 10 weather & lighting presets (seeds `5000..5009`):
-1. `FSD-1_Intersection_Turn` (`ClearNoon`): Red traffic light stop-line braking and green-light intersection traversal.
-2. `FSD-2_Dynamic_Overtake_Left` (`CloudyNoon`): Stalled vehicle detection and $28\text{ m}$ Minimum-Jerk Quintic S-Curve left-lane overtake.
-3. `FSD-3_Pedestrian_Crosswalk_AEB` (`WetNoon`): Jaywalking pedestrian crosswalk hazard detection and Rule 1 emergency braking (AEB).
-4. `FSD-4_Urban_ACC_Follow` (`SoftRainNoon`): True Constant-Time-Headway ACC ($d^*(24)=16.0\text{ m}$, $24\text{ km/h}$) behind a moving lead vehicle.
-5. `FSD-5_MultiBlock_Overtake_Right` (`ClearSunset`): Multi-lane urban avenue right-lane Quintic S-Curve overtake.
-6. `FSD-6_StopAndGo_LeadBrake` (`WetCloudyNoon`): Lead vehicle cruising then sudden mid-route braking to $0\text{ km/h}$ followed by recovery.
-7. `FSD-7_BlindSpot_Hold_Then_Overtake` (`MidRainyNoon`): Stalled front vehicle + adjacent blind-spot vehicle passing ($x \in [-10, 7.5]\text{ m}$) — 360° safety shield holds lane until clear, then overtakes.
-8. `FSD-8_ConstructionZone_RightBypass` (`WetSunset`): Dual-cone construction blockage bypass via right-lane Quintic S-Curve.
-9. `FSD-9_Night_Pedestrian_AEB` (`ClearNight`): Nighttime driving with ego vehicle headlights (`Position | LowBeam`) and emergency crosswalk braking.
-10. `FSD-10_HeavyRain_Intersection_ACC` (`HardRainNoon`): Heavy rain storm visibility with multi-agent intersection ACC tracking.
+### 5.1. CARLA 0.9.16 (`Town10HD_Opt` & Unseen `Town03`) Closed-Loop Benchmark
+Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, 20 Hz synchronous, `GlobalRoutePlanner` A\*)** separating zero-actor-query `vision_estimated` perception from simulator `gt` state:
 
-| Evaluation Metric | Target KPI | Measured Result | Status |
-| :--- | :--- | :--- | :---: |
-| **Single-Frame Inference Latency (Full FSD v2 / Base)** | **$\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$)** | **33.84 ms (29.5 FPS, P95: 35.68 ms) / 31.67 ms** | **PASS** |
-| **Route Completion Rate (10 Scenarios, Seeds 5000–5009)** | **$\ge 85.0\%$** | **100.0% (10/10 Scenarios, 680.0 m, 2,004 frames; vs. 60.0% Rule-Only)** | **PASS** |
-| **Crash-Free Rate** | **$\ge 95.0\%$** | **100.0% (0 vehicle/pedestrian collisions, 0 infractions)** | **PASS** |
-| **Validation ECE (Uncalibrated $\to$ Calibrated, $M=15$ Bins)** | **$\le 0.0500$** | **0.0060 $\to$ 0.0000** | **PASS** |
-| **Scenario Composite Driving Score ($DS_{\text{scen}}$)** | **$\ge 85.0\%$** | **100.0%** | **PASS** |
-| **Mean Cross-Track Error $\overline{|e_y|}$ & Aux Vision Depth MAE** | **$\le 0.25\text{ m}$ / $\le 5.0\text{ m}$** | **0.084 m / 3.58 m MAE** | **PASS** |
+| Evaluation Metric | Target KPI | `vision_estimated` Mode (No Sim Actor Query) | `gt` State Hybrid Mode | Status |
+| :--- | :--- | :--- | :--- | :---: |
+| **Single-Frame Latency (`32.40 ms` neural + `0.45 ms` ctrl; `+6.40 ms` IPC)** | **$\le 40.0\text{ ms}$** | **32.85 ms (30.4 FPS, P95: 33.96 ms)** | **32.85 ms (31.67 ms base w/o aux+traj)** | **PASS** |
+| **`Town10HD_Opt`: 10 Paired Eps (`680 m`) / 50 Cross-Weather (`3,400 m`)** | **$\ge 85.0\%$** | **100.0% (10/10) / 94.0% (47/50, 3-seed $46.7\pm 0.6$)** | **100.0% (10/10) / 98.0% (49/50)** | **PASS** |
+| **`Town10HD_Opt`: 10 Multi-Block Long Routes (`200 m/ep`, `2,000 m`)** | **$\ge 85.0\%$** | **90.0% (9/10, $R_c=95.4\%$)** | **100.0% (10/10, $R_c=100.0\%$)** | **PASS** |
+| **`Town03` Unseen Map (`10 × 200 m` Roundabout/Grade, `2,000 m`)** | **$\ge 80.0\%$** | **80.0% (8/10, $R_c=91.2\%$, $\overline{|e_y|}=0.112\text{ m}$)** | **90.0% (9/10, $R_c=96.5\%$)** | **PASS** |
+| **Stress Test: 10% Frame Drop + 25% Patch Occlusion (50-Ep)** | **$\ge 80.0\%$** | **88.0% (44/50, $\Delta V_t/\Delta n_t$ + latch active)** | **94.0% (47/50)** | **PASS** |
+| **Teacher $\text{ECE}_{\text{mean}}$ / Physical $\text{ECE}_{\text{phys}}$ / $\text{HCER}_{0.90,\text{AEB}}$ / Physical $\text{FNR}_{\text{AEB}}$** | **$\le 0.0500$** | **0.0142 / 0.0318 / 0.45% (1.12% all) / 1/48 (2.1%)** | **0.0000 / 0.0110 / 0.10% / 0/48** | **PASS** |
+| **Lead Depth MAE / Co-Pres Ped MAE / Speed Jitter RMS / $\overline{|e_y|}$** | **$\le 5.0\text{ m}$ / $\le 0.25\text{ m}$** | **3.23 m / 2.64 m / 1.84 km/h / 0.094 m** | **0.0 m / 0.0 m / 0.0 km/h / 0.085 m** | **PASS** |
 
-### 5.2. MetaDrive 0.4.3 Procedural Highway & Intersection Benchmark (50 Unseen Maps, `4,153` frames)
+### 5.2. MetaDrive 0.4.3 Procedural Highway & Intersection Benchmark ($\Delta t = 0.05\text{ s}$, 50 Unseen Maps, `20,765` steps / `9,520 m`)
 
-| Evaluation Metric | Target KPI | Measured Result | Status |
-| :--- | :--- | :--- | :---: |
-| **Single-Frame Inference Latency (Seeds 5000–5049)** | **$\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$)** | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **PASS** |
-| **Destination Arrival Rate (`arrive_dest` at $\ge 98\%$ arc)** | **$\ge 85.0\%$** | **100.0% (50/50 episodes arrived; 98.7% mean arc progress)** | **PASS** |
-| **Crash-Free Rate** | **$\ge 95.0\%$** | **100.0% (`crash=0`, `out_of_road=0`)** | **PASS** |
-| **Calibrated ECE ($M=15$ Bins)** | **$\le 0.0500$** | **0.0000** | **PASS** |
+| Evaluation Metric | Target KPI | `vision_estimated` Mode | `gt` State Hybrid Mode | Status |
+| :--- | :--- | :--- | :--- | :---: |
+| **Single-Frame Latency ($\bar{v}=33.0\text{ km/h}$, `415.3` steps / `190.4 m` per ep)** | **$\le 40.0\text{ ms}$** | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **30.20 ms (33.1 FPS)** | **PASS** |
+| **Arrival Rate: 10-Ep (`4,153` steps, `1,904 m`) / 50-Ep (`20,765` steps, `9,520 m`)** | **$\ge 85.0\%$** | **100.0% (10/10) / 96.0% (48/50, CI $[86.3, 99.5]\%$)** | **100.0% (10/10) / 100.0% (50/50; 98.7% arc)** | **PASS** |
+| **Unseen Closed-Loop Test $\text{ECE}_{\text{mean}}$ / NLL / Brier ($M=15$ Bins)** | **$\le 0.0500$** | **0.0184 / 0.096 / 0.031 (Noisy Sensor)** | **0.0000 / 0.041 / 0.012 (GT Teacher)** | **PASS** |
 
 ---
 
@@ -171,7 +167,7 @@ Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, `Town10HD_Opt`, `GlobalRoutePl
 
 ```bibtex
 @article{wicklim2026autonomousvehicle,
-  title   = {Sub-40ms Non-Autoregressive Vision-Language Autonomous Driving via Spatial DINOv2-Laya Alignment and Quintic S-Curve Safety Control},
+  title   = {Real-Time Closed-Loop Driving with Frozen DINOv2-Laya Spatial Pooling and Quintic Path Tracking},
   author  = {Wick-Lim},
   year    = {2026},
   url     = {https://github.com/Wick-Lim/AutonomousVehicle}
