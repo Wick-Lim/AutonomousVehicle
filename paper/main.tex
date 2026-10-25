@@ -7,23 +7,8 @@
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{hyperref}
-\usepackage[margin=0.68in]{geometry}
+\usepackage[margin=0.72in]{geometry}
 \usepackage{caption}
-
-\setlength{\textfloatsep}{5pt plus 1pt minus 1pt}
-\setlength{\floatsep}{4pt plus 1pt minus 1pt}
-\setlength{\intextsep}{4pt plus 1pt minus 1pt}
-\setlength{\dbltextfloatsep}{5pt plus 1pt minus 1pt}
-\setlength{\dblfloatsep}{4pt plus 1pt minus 1pt}
-\captionsetup{font=footnotesize,skip=2pt}
-
-\let\oldthebibliography\thebibliography
-\renewcommand{\thebibliography}[1]{%
-  \oldthebibliography{#1}%
-  \footnotesize
-  \setlength{\itemsep}{0pt}%
-  \setlength{\parskip}{1pt}%
-}
 
 \hypersetup{
     colorlinks=true,
@@ -47,11 +32,11 @@
 \maketitle
 
 \begin{abstract}
-Autoregressive vision-language-action (VLA) models \cite{brohan2023rt2,kim2024openvla,liu2023visual} decode tokens sequentially ($>300$\,ms/frame), exceeding the $50$\,ms budget of $20$\,Hz vehicle control \cite{dosovitskiy2017carla,li2022metadrive}. We present a real-time hybrid closed-loop driving stack that couples frozen DINOv2 (\texttt{facebook/dinov2-base}, $86.58$M) \cite{oquab2024dinov2,caron2021emerging,dosovitskiy2021image} and frozen Laya (\texttt{convaiinnovations/laya}, $395.21$M transformer) \cite{laya2024nonautoregressive,warner2024modernbert,devlin2019bert} via a trainable $4 \times 9$ spatial-temporal adapter ($4.23$M parameters: $1.85$M spatial MLP, $1.05$M temporal gate, $1.05$M auxiliary perception head with decoupled lead/pedestrian depth and range-rate branches, and $0.28$M readout/trajectory heads) with HD-map routing, a rule-based safety shield, and kinematic path tracking. One synchronized forward+control pass takes $32.85$\,ms ($30.4$\,FPS on Ryzen~5 7500F / RTX~4070~Ti, FP32 $B=1$: $0.42$\,ms preprocess + $16.43$\,ms DINOv2 + $0.82$\,ms projector + $0.49$\,ms aux head + $13.55$\,ms Laya + $0.69$\,ms 6-WP trajectory head + $0.45$\,ms shield/PID; $31.67$\,ms base without aux/trajectory heads, excluding $6.40$\,ms simulator \texttt{world.tick()} IPC). Rather than performing free-space obstacle-avoidance path planning, the 6-waypoint trajectory head acts as a maneuver-conditioned curvature-smoothing regularizer supervised by parametric kinematic reference curves (open-loop trajectory collision rate $\text{CR}_{\text{traj}}=3.8\%$ before longitudinal CTH-ACC/AEB shielding vs.\ $0.0\%$ executed). In \texttt{vision\_estimated} mode, lead-vehicle speed $\hat{v}_{\text{lead}}$ is estimated via a 5-step ($0.25$\,s) least-squares regression slope fused with direct visual range-rate regression (reducing velocity jitter RMS from $9.62$ to $1.84$\,km/h, $\text{MAE}=2.41$\,km/h), while a dedicated pedestrian depth head resolves vehicle--pedestrian co-presence ambiguity ($\text{MAE}=2.64$\,m vs.\ $14.8$\,m coupled). On unseen closed-loop \texttt{vision\_estimated} episodes, teacher-rule $\text{ECE}_{\text{mean}}=0.0142$, independent physical-hazard $\text{ECE}_{\text{phys}}=0.0318$ (high-confidence error rate $\text{HCER}_{0.90}=1.12\%$, AEB $\text{HCER}_{0.90}=0.45\%$), and physical hazard AEB false-negative rate is $\text{FNR}_{\text{AEB}}=1/48$ events ($2.1\%$). Downstream control combines a 14-waypoint ($28$\,m lookahead, $2$\,m piecewise-linear spacing) spatial quintic transition $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ \cite{flash1985coordination,werling2010optimal}, chord-angle tracking \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}, fused map/trajectory bicycle curvature feedforward, a $1.5$\,s forward-lateral blind-spot latch (partial mitigation for previously seen flank vehicles), and constant-time-headway ACC \cite{ioannou1993autonomous,rajamani2001experimental,treiber2000congested}. Across CARLA 0.9.16 (\texttt{Town10HD\_Opt} $680$\,m paired, $3,400$\,m cross-weather, $2,000$\,m multi-block, plus \texttt{Town03} $2,000$\,m) and 50 unseen MetaDrive maps ($20,765$ steps, $9,520$\,m), \texttt{vision\_estimated} DINOv2+Laya achieves $47/50$ ($94.0\%$, 3-seed $46.7\pm 0.6$), showing an observed 5-episode margin over a 2-layer trainable Transformer ($42/50$, two-sided McNemar $p=0.063$, one-sided $p=0.031$) and significant gains ($p < 0.01$) over a 2-layer MLP ($39/50$), direct \texttt{ExpertLabeler} rules ($38/50$), random frozen Laya ($36/50$), prompt-only ($33/50$), and $300$\,ms lag ($34/50$).
+Token-by-token vision-language-action (VLA) decoders \cite{brohan2023rt2,kim2024openvla,liu2023visual} take $>300$\,ms/frame, exceeding the $50$\,ms budget of $20$\,Hz control \cite{dosovitskiy2017carla,li2022metadrive,geiger2012we,caesar2020nuscenes,sun2020scalability}. Here we connect frozen DINOv2 (\texttt{facebook/dinov2-base}, $86.58$M) \cite{oquab2024dinov2,caron2021emerging,dosovitskiy2021image} and frozen Laya (\texttt{convaiinnovations/laya}, $395.21$M) \cite{laya2024nonautoregressive,warner2024modernbert,devlin2019bert} via a $4 \times 9$ adapter ($4.23$M weights: $1.85$M MLP, $1.05$M $\Delta n_t$-normalized temporal gate, $1.05$M aux head with decoupled $\hat{d}_{\text{lead}}$, $\hat{d}_{\text{ped}}$, and $\hat{\dot{d}}_{\text{vis}}$ branches, $0.28$M readout/6-WP heads) to an HD-map shield and PID tracker \cite{bojarski2016end,bansal2019chauffeurnet}. One synchronized pass takes $32.85$\,ms ($30.4$\,FPS on Ryzen~5 7500F / RTX~4070~Ti, FP32 $B=1$: $0.42 + 16.43 + 0.82 + 0.49 + 13.55 + 0.69 + 0.45 = 32.85$\,ms; $31.67$\,ms base without aux/traj; $+6.40$\,ms CARLA \texttt{world.tick()} IPC). Supervised by rule curves $\tau^{\text{ref}}_{1:6}$, the 6-WP head smooths curvature rather than planning obstacle detours (open-loop box overlap $\text{CR}_{\text{traj}}=3.8\%$ vs.\ $0.0\%$ closed-loop crashes). Under \texttt{vision\_estimated} mode, a 5-step ($0.25$\,s) ordinary least-squares (OLS) slope \cite{savitzky1964smoothing,kalman1960new} plus $\hat{\dot{d}}_{\text{vis}}$ cuts $\hat{v}_{\text{lead}}$ jitter RMS from $9.62 \to 1.84$\,km/h ($\text{MAE}=2.41$\,km/h), and dedicated \texttt{ped\_dist\_head} cuts vehicle+pedestrian co-presence MAE from $14.8 \to 2.64$\,m. On $9,905$ unseen frames, teacher $\text{ECE}_{\text{mean}}=0.0142$ \cite{guo2017calibration,zadrozny2002transforming,brier1950verification}, physical-hazard $\text{ECE}_{\text{phys}}=0.0318$ ($\text{HCER}_{0.90}=1.12\%$ all, $0.45\%$ AEB), and $\text{FNR}_{\text{AEB}}=1/48$ events ($2.1\%$). Control uses a 14-node ($d_k = 2(k+1)$\,m, $28$\,m lookahead) piecewise-linear quintic blend $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ \cite{flash1985coordination,werling2010optimal}, chord tracking \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}, bicycle curvature feedforward, a $1.5$\,s front-lateral latch, and CTH-ACC ($d^*(v_{\text{ego}}) = 8.0 + 1.2(v_{\text{ego}}/3.6)$, $k_g = 0.85$\,(km/h)/m) \cite{ioannou1993autonomous,rajamani2001experimental,treiber2000congested}. Across CARLA 0.9.16 and 50 unseen MetaDrive maps ($20,765$ steps, $9,520$\,m), \texttt{vision\_estimated} DINOv2+Laya finishes $47/50$ ($94.0\%$, $46.7\pm 0.6$) vs.\ $42/50$ for a 2-layer Transformer (McNemar \cite{mcnemar1947note} $p=0.063$ two-sided, $p=0.031$ one-sided) and $p < 0.01$ over 2-layer MLP ($39/50$), \texttt{ExpertLabeler} ($38/50$), random Laya ($36/50$), prompt-only ($33/50$), and $300$\,ms lag ($34/50$).
 \end{abstract}
 
 \section{Introduction and Problem Formulation}
-Autoregressive decoders evaluate $P(y_{1:K} \mid I_t, \mathcal{T}_t) = \prod_{k=1}^{K} P(y_k \mid y_{<k}, I_t, \mathcal{T}_t)$ over $K \approx 15$ serial steps \cite{brohan2023rt2,kim2024openvla,liu2023visual}, whereas planning-oriented and sensor-fusion stacks \cite{hu2023planning,jiang2023vad,li2022bevformer,codevilla2018end,chen2020learning,prakash2021multi,chitta2022transfuser,jaeger2023hidden} require $\Delta t \le 50$\,ms. In our formulation, control at step $t$ reads three discrete tactical decisions and $K_w=6$ maneuver-conditioned kinematic reference waypoints ($t_k = 0.5k$\,s) in one bidirectional pass \cite{devlin2019bert,warner2024modernbert,laya2024nonautoregressive}:
+Evaluating $P(y_{1:K} \mid I_t, \mathcal{T}_t) = \prod_{k=1}^{K} P(y_k \mid y_{<k}, I_t, \mathcal{T}_t)$ over $K \approx 15$ serial steps \cite{brohan2023rt2,kim2024openvla,liu2023visual} violates $\Delta t \le 50$\,ms in $20$\,Hz planners \cite{hu2023planning,jiang2023vad,li2022bevformer,codevilla2018end,chen2020learning,prakash2021multi,chitta2022transfuser,jaeger2023hidden}. One bidirectional pass \cite{devlin2019bert,warner2024modernbert,laya2024nonautoregressive} at tick $t$ reads three discrete targets and $K_w=6$ reference points ($t_k = 0.5k$\,s):
 \begin{align}
     m_t &\in \{\texttt{keep\_lane}, \texttt{change\_left}, \nonumber\\
         &\quad\; \texttt{change\_right}, \texttt{follow\_lead}\}, \\
@@ -69,22 +54,25 @@ Autoregressive decoders evaluate $P(y_{1:K} \mid I_t, \mathcal{T}_t) = \prod_{k=
 
 \section{Architecture, Multi-Task Training, and Calibration}
 \label{sec:arch}
-Camera frames are cropped ($\texttt{crop\_top}=0.25$, $\texttt{crop\_bottom}=0.10$) and resized to $196 \times 392$. Frozen DINOv2 ViT-B/14 ($p=14$, $86.58$M params) \cite{oquab2024dinov2,caron2021emerging,dosovitskiy2021image} extracts $F_{\text{patch}} \in \mathbb{R}^{B \times 392 \times 768}$ ($14 \times 28$ grid). \texttt{SpatialProjector} (\texttt{src/models/spatial\_projector.py}) pools $14 \times 28 \to 4 \times 9$ (36 tokens), adds $E_{\text{row}} + E_{\text{col}}$, projects $768 \to 1024$ via a 2-layer GELU MLP ($1.85$M core params), and fuses step-normalized temporal residual $\Delta V_t = (V_t - V_{t-\Delta n_t})/\Delta n_t$ ($1.05$M params, where $\Delta n_t \ge 1$ is elapsed frames so dropped frames scale proportionally) with region-pooled \texttt{AuxiliaryPerceptionHead} ($1.05$M params with decoupled heads for lead distance $\hat{d}_{\text{lead}}$, dedicated pedestrian distance $\hat{d}_{\text{ped}}$, visual range-rate $\hat{\dot{d}}_{\text{vis}}$, lane offset $\hat{e}_y$, traffic light $\hat{c}_{\text{TL}}$, hazard $\hat{c}_{\text{haz}}$, and forward-lateral blind spot $\hat{p}_{\text{BS}}$):
+Cropped RGB ($\texttt{crop\_top}=0.25$, $\texttt{crop\_bottom}=0.10$, $196 \times 392$) enters frozen DINOv2 ViT-B/14 ($p=14$, $86.58$M) \cite{oquab2024dinov2,caron2021emerging,dosovitskiy2021image} for $F_{\text{patch}} \in \mathbb{R}^{B \times 392 \times 768}$ ($14 \times 28$). \texttt{SpatialProjector} (\texttt{src/models/spatial\_projector.py}) pools $(4, 9)$ (36 tokens), adds $E_{\text{row}} + E_{\text{col}}$, projects $768 \to 1024$ ($1.85$M MLP), and adds step-normalized residual $\Delta V_t = (V_t - V_{t-\Delta n_t})/\Delta n_t$ ($1.05$M params, $\Delta n_t \ge 1$ elapsed steps for frame drops; unwarped in token space so curve yaw mixes background flow with object motion, though $E_{\text{telemetry}}$ supplies ego yaw rate and \texttt{no\_temporal} drops wet-curve \texttt{FSD-10} from $5/5 \to 3/5$):
 \begin{align}
     G_t &= \text{AdaptiveAvgPool2d}_{(4,9)}(\tilde{F}_t) \in \mathbb{R}^{B \times 768 \times 4 \times 9}, \\
     V_t &= \text{MLP}\big(\text{Flatten}(G_t + E_{\text{row}} + E_{\text{col}})\big), \\
     \tilde{V}_t &= V_t + \tanh(\alpha_{\text{temp}})\, W_{\text{temp}}\!\left(\frac{V_t - V_{t-\Delta n_t}}{\Delta n_t}\right).
 \end{align}
-Because $\Delta V_t$ is computed in token space without homography ego-motion compensation, ego yaw rotation on curves mixes background flow with object motion; however, $E_{\text{telemetry}}$ supplies ego yaw-rate context to Laya, and ablating $\Delta V_t$ (\texttt{no\_temporal}) reduces curved-road dynamic following (\texttt{FSD-10}) from $5/5 \to 3/5$. Multimodal sequence $Z = [e_{\text{[CLS]}}; \tilde{V}_t; E_{\text{telemetry}}; e_{\text{choice}}; e_{\text{score}}; e_{\text{noul}}]$ passes through frozen Laya ($395.21$M params) \cite{laya2024nonautoregressive,warner2024modernbert}. Linear heads ($W_m, W_s, W_b$) and 2-layer trajectory MLP $W_{\text{traj}}$ ($0.28$M params combined) predict discrete logits and bounded residuals $\Delta\hat{\tau} \in \mathbb{R}^{6 \times 3}$ over prior $\tau^0_k$ ($t_k = 0.5k$\,s), supervised against rule-generated parametric curve $\tau^{\text{ref}}_k = \big((v^*/3.6)t_k,\, y_{\text{shift}}(m^*)s(k/6),\, v^*\big)$:
+\texttt{AuxiliaryPerceptionHead} ($1.05$M) predicts $\hat{c}_{\text{TL}}$ (rows $0..1$), $\hat{d}_{\text{lead}}$, dedicated $\hat{d}_{\text{ped}}$ (\texttt{ped\_dist\_head}), visual range-rate $\hat{\dot{d}}_{\text{vis}}$ (\texttt{range\_rate\_head}), $\hat{e}_y$, $\hat{c}_{\text{haz}}$ (cols $3..5$), and $\hat{p}_{\text{BS}}$ (cols $0..2, 6..8$). Frozen Laya ($395.21$M) \cite{laya2024nonautoregressive,warner2024modernbert} and heads $(W_m, W_s, W_b, W_{\text{traj}})$ ($0.28$M) fit rule curve $\tau^{\text{ref}}_k = \big((v^*/3.6)t_k,\, y_{\text{shift}}(m^*)s(k/6),\, v^*\big)$:
 \begin{align}
     \hat{\tau}_{1:6} &= \tau^0_{1:6} + \text{diag}(1.5, 0.35, 3.0)\, W_{\text{traj}}\bar{H}, \\
     \mathcal{L} &= w_m \mathcal{L}_{\text{CE}}^{(m)} + w_s \mathcal{L}_{\text{CE}}^{(s)} + w_a \mathcal{L}_{\text{BCE}}^{(b)} \nonumber\\
                 &\quad + w_\tau \mathcal{L}_{\text{SmoothL1}}(\hat{\tau}_{1:6}, \tau^{\text{ref}}_{1:6}) + w_p \mathcal{L}_{\text{aux}}.
 \end{align}
-Because $\tau^{\text{ref}}_{1:6}$ is a parametric curve determined by $(m^*, v^*)$ rather than free-space obstacle optimization, $W_{\text{traj}}$ serves as a maneuver-conditioned curvature-smoothing regularizer rather than an independent collision-avoidance planner. In a counterfactual lateral obstacle-shift test ($\Delta y_{\text{obs}} \in \{-0.8, 0.0, +0.8\}$\,m at $d=22$\,m across $200$ frames), predicted $\hat{y}_6$ shifts by only $|\Delta\hat{y}_6| = 0.12$\,m within-lane when $m_t=\texttt{keep\_lane}$, versus $3.41$\,m when $m_t$ switches to $\texttt{change\_left/right}$. Evaluating the raw 6-WP trajectory open-loop over $3.0$\,s against ground-truth actor boxes yields a $3.8\%$ ($75/1,981$ frames) trajectory overlap rate ($\text{CR}_{\text{traj}}$) prior to longitudinal CTH-ACC/AEB shielding, versus $0.0\%$ executed collisions.
+Because $\tau^{\text{ref}}_k$ is rule-generated from $(m^*, v^*)$, $W_{\text{traj}}$ only smooths curvature; obstacle bypass comes from $m_t$ + HD-map spline (counterfactual obstacle shift $\Delta y_{\text{obs}} \in \{-0.8, 0, +0.8\}$\,m at $d=22$\,m moves $\hat{y}_6$ by $|\Delta\hat{y}_6|=0.12$\,m when $m_t=\texttt{keep\_lane}$ vs.\ $3.41$\,m on lane change; open-loop 3\,s box overlap $\text{CR}_{\text{traj}}=3.8\%$ on $75/1,981$ frames vs.\ $0.0\%$ closed-loop).
 \begin{scriptsize}
 \begin{verbatim}
-# scripts/02_train_projector.py (4.23M total trainable params)
+# src/models/spatial_projector.py & scripts/02_train_projector.py
+self.lead_dist_head = nn.Linear(hidden_dim, 1)  # d_lead [0,60]m
+self.ped_dist_head = nn.Linear(hidden_dim, 1)   # d_ped [0,100]m
+self.range_rate_head = nn.Linear(hidden_dim, 1) # dd_dt [-25,25]
 trainable_params = (list(system.projector.parameters())  # 3.96M
   + list(system.laya.maneuver_head.parameters())         # +0.28M
   + list(system.laya.speed_head.parameters())
@@ -93,7 +81,7 @@ trainable_params = (list(system.projector.parameters())  # 3.96M
 loss = w_m*l_m + w_s*l_s + w_a*l_a + 0.5*l_traj + 0.2*l_aux
 \end{verbatim}
 \end{scriptsize}
-In Stage~1, all $4,232,991$ trainable parameters are jointly optimized for 15 epochs across 3 seeds ($42, 43, 44$; batch 32, AdamW \cite{loshchilov2019decoupled} $\text{lr}=3\times 10^{-4}$, $(w_m,w_s,w_a,w_\tau,w_p)=(1.0,1.0,2.0,0.5,0.2)$) on $50,000$ frames ($500$ episodes) split by contiguous episode blocks (\texttt{split\_by\_episode=True}: episodes $0..424$ train / $425..499$ val). Stage~2 (\texttt{03\_calibrate.py}) fits $(T_m, T_s, T_b) = (0.050, 0.050, 0.100)$ via L-BFGS \cite{guo2017calibration} ($M=15$ bins), reducing validation teacher-rule $\text{ECE}_{\text{mean}} = \frac{1}{3}(\text{ECE}_m + \text{ECE}_s + \text{ECE}_b)$ from $0.0060 \to 0.0000$. On unseen closed-loop \texttt{vision\_estimated} test episodes ($9,905$ frames across 50 episodes), teacher-rule alignment is $\text{ECE}_{\text{mean}}=0.0142$ ($\text{ECE}_b=0.0195$, $\text{NLL}=0.089$, $\text{Brier}=0.028$). Evaluated directly against independent physical hazard ground truth $y_{\text{phys},t} \in \{0,1\}$ ($\text{TTC} \le 1.8$\,s to any actor or $d \le 15$\,m to a red stop line, spanning $48$ physical hazard events / $220$ hazard ticks), physical-hazard calibration is $\text{ECE}_{\text{phys}}=0.0318$ ($\text{Brier}_{\text{phys}}=0.034$), high-confidence error rate at $\hat{p} \ge 0.90$ is $\text{HCER}_{0.90}=1.12\%$ across all 3 heads ($\text{HCER}_{0.90,\text{AEB}}=0.45\%$, $45/9,905$ frames), and event-level AEB false-negative rate is $\text{FNR}_{\text{AEB,evt}}=1/48$ ($2.1\%$, tick-level $6/220=2.7\%$).
+Stage~1 trains $4,232,991$ weights for 15 epochs (seeds $42, 43, 44$; batch 32, AdamW \cite{loshchilov2019decoupled} $\text{lr}=3\times 10^{-4}$, $(w_m,w_s,w_a,w_\tau,w_p)=(1,1,2,0.5,0.2)$) on $50,000$ frames ($500$ episodes, \texttt{split\_by\_episode=True}: $0..424$ train / $425..499$ val). Stage~2 (\texttt{03\_calibrate.py}) fits $(T_m, T_s, T_b) = (0.050, 0.050, 0.100)$ by L-BFGS \cite{guo2017calibration,zadrozny2002transforming} ($M=15$ bins; val $\text{ECE}_{\text{mean}}: 0.0060 \to 0.0000$). On $9,905$ unseen \texttt{vision\_estimated} frames (50 episodes), teacher $\text{ECE}_{\text{mean}}=0.0142$ ($\text{ECE}_b=0.0195$, $\text{NLL}=0.089$, $\text{Brier}=0.028$ \cite{brier1950verification}); against physical hazards $y_{\text{phys},t} \in \{0,1\}$ ($\text{TTC} \le 1.8$\,s or red-light $d \le 15$\,m; $48$ events / $220$ ticks), $\text{ECE}_{\text{phys}}=0.0318$ ($\text{Brier}_{\text{phys}}=0.034$), $\text{HCER}_{0.90}=1.12\%$ all ($\text{HCER}_{0.90,\text{AEB}}=0.45\%$, $45/9,905$), and $\text{FNR}_{\text{AEB,evt}}=1/48$ ($2.1\%$, $6/220$ ticks $= 2.7\%$).
 
 \begin{table}[t]
 \centering
@@ -119,64 +107,42 @@ Calib \& Physical Hazard & Teacher $\text{ECE}=0.0142$; Phys $\text{ECE}_{\text{
 
 \begin{figure*}[t]
     \centering
-    \includegraphics[width=0.84\textwidth]{figures/fig2_control_kinematics.png}
+    \includegraphics[width=0.90\textwidth]{figures/fig2_control_kinematics.png}
     \caption{Control kinematics: (a) 28\,m lookahead ($14$ waypoints at $2.0$\,m spacing) spatial quintic transition $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ vs.\ $3.5$\,m step switch; (b) constant-time-headway (CTH) ACC velocity convergence ($v_{\text{ego}} \to 24.0$\,km/h at $d^*(24) = 8.0 + 1.2(24/3.6) = 16.0$\,m).}
     \label{fig:kinematics}
 \end{figure*}
 
-\begin{table*}[t]
-\centering
-\caption{Closed-loop evaluation separating zero-actor-query \texttt{vision\_estimated} perception from simulator \texttt{gt} state (\texttt{checkpoints/eval\_metrics\_carla.json}).}
-\label{tab:main_results}
-\resizebox{0.98\textwidth}{!}{%
-\begin{tabular}{llcccc}
-\toprule
-Simulator & Metric & Target KPI & \texttt{vision\_estimated} Mode (No Sim Actor Query) & \texttt{gt} State Hybrid Mode & Status \\
-\midrule
-\multirow{7}{*}{CARLA 0.9.16} 
- & Single-Frame Latency ($32.40$\,ms neural + $0.45$\,ms ctrl; $+6.40$\,ms sim IPC) & $\le 40.0\,\text{ms}$ & 32.85\,ms (30.4\,FPS, P95: 33.96\,ms) & 32.85\,ms (31.67\,ms w/o aux+traj) & PASS \\
- & \texttt{Town10HD\_Opt}: 10 Paired Eps ($680$\,m) / 50 Cross-Weather ($3,400$\,m) & $\ge 85.0\%$ & 100.0\% (10/10) / 94.0\% (47/50, 3-seed $46.7\pm 0.6$) & 100.0\% (10/10) / 98.0\% (49/50) & PASS \\
- & \texttt{Town10HD\_Opt}: 10 Multi-Block Long Routes ($200$\,m/ep, $2,000$\,m) & $\ge 85.0\%$ & 90.0\% (9/10, $R_c=95.4\%$) & 100.0\% (10/10, $R_c=100.0\%$) & PASS \\
- & \texttt{Town03} Unseen Map ($10\times 200$\,m Roundabout/Grade, $2,000$\,m) & $\ge 80.0\%$ & 80.0\% (8/10, $R_c=91.2\%$, $\overline{|e_y|}=0.112$\,m) & 90.0\% (9/10, $R_c=96.5\%$) & PASS \\
- & Stress Test: $10\%$ Frame Drop + $25\%$ Patch Occlusion (50-Ep) & $\ge 80.0\%$ & 88.0\% (44/50, $\Delta V_t/\Delta n_t$ + latch active) & 94.0\% (47/50) & PASS \\
- & Teacher $\text{ECE}_{\text{mean}}$ / Physical $\text{ECE}_{\text{phys}}$ / $\text{HCER}_{0.90,\text{AEB}}$ / Physical $\text{FNR}_{\text{AEB}}$ & $\le 0.0500$ & $0.0142$ / $0.0318$ / $0.45\%$ ($1.12\%$ all) / $1/48$ ($2.1\%$) & $0.0000$ / $0.0110$ / $0.10\%$ / $0/48$ & PASS \\
- & Lead Depth MAE / Co-Pres Ped MAE / Speed Jitter RMS / $\overline{|e_y|}$ & $\le 5.0$\,m / $\le 0.25$\,m & $3.23$\,m / $2.64$\,m / $1.84$\,km/h / $0.094$\,m & $0.0$\,m / $0.0$\,m / $0.0$\,km/h / $0.085$\,m & PASS \\
-\midrule
-\multirow{3}{*}{MetaDrive 0.4.3 ($\Delta t=0.05$\,s)} 
- & Single-Frame Latency ($\bar{v}=33.0$\,km/h, $190.4$\,m \& $415.3$ steps/ep) & $\le 40.0\,\text{ms}$ & 30.20\,ms (33.1\,FPS, P95: 31.67\,ms) & 30.20\,ms (33.1\,FPS) & PASS \\
- & Arrival: 10-Ep ($4,153$ steps, $1,904$\,m) / 50-Ep ($20,765$ steps, $9,520$\,m) & $\ge 85.0\%$ & 100.0\% (10/10) / 96.0\% (48/50, CI $[86.3, 99.5]\%$) & 100.0\% (10/10) / 100.0\% (50/50; 98.7\% arc) & PASS \\
- & Unseen Closed-Loop Test $\text{ECE}_{\text{mean}}$ / NLL / Brier ($M=15$ Bins) & $\le 0.0500$ & $0.0184$ / $0.096$ / $0.031$ (Noisy Sensor) & $0.0000$ / $0.041$ / $0.012$ (GT Teacher) & PASS \\
-\bottomrule
-\end{tabular}%
-}
-\end{table*}
-
 \section{Input Provenance, Spatial Quintic Spline, Curvature Feedforward, and CTH-ACC}
 \label{sec:control}
-Table~\ref{tab:params} specifies the runtime provenance of every variable (\texttt{scripts/04\_evaluate\_sim.py}). In \texttt{vision\_estimated} mode, zero simulator actor queries are used. Because 1-step ($\Delta t=0.05$\,s) depth differencing amplifies $1$\,m depth noise into $72$\,km/h raw velocity spikes ($9.62$\,km/h RMS jitter even after $\beta=0.35$ EMA), we estimate range rate over a $K_w=5$-step ($W=0.25$\,s) sliding window via ordinary least-squares (OLS) linear regression $\hat{\dot{d}}_{\text{reg},t} = \frac{\sum_{j=-2}^{2} j\,\hat{d}_{\text{lead},t-2+j}}{10\Delta t}$ (reducing uncorrelated noise variance by $10\times$), fused with direct visual range-rate readout $\hat{\dot{d}}_{\text{vis},t}$ from \texttt{AuxiliaryPerceptionHead}: $\hat{\dot{d}}_t = 0.70\hat{\dot{d}}_{\text{reg},t} + 0.30\hat{\dot{d}}_{\text{vis},t}$, with automatic window reset when $|\hat{d}_{\text{lead},t} - \hat{d}_{\text{lead},t-1}| > 6.0$\,m on cut-in or target switch, followed by EMA ($\beta=0.35$) to yield $\hat{v}_{\text{lead},t} = \text{clip}((1-\beta)\hat{v}_{\text{lead},t-1} + \beta(v_{\text{ego},t} + 3.6\hat{\dot{d}}_t), 0, 60)$. Across closed-loop logs, this reduces frame-to-frame velocity jitter RMS from $9.62 \to 1.84$\,km/h ($\hat{v}_{\text{lead}}$ MAE $6.85 \to 2.41$\,km/h), recovers from $>6$\,m cut-in target switches in $0.15$\,s ($3$ frames), and detects lead hard braking (\texttt{FSD-6}) with $0.10$\,s ($2$-frame) lag. To prevent co-presence coupling when a lead vehicle (e.g., at $35$\,m) and a crosswalk pedestrian (e.g., at $12$\,m) appear simultaneously, \texttt{AuxiliaryPerceptionHead} includes a dedicated pedestrian distance branch $\hat{d}_{\text{ped},t}$ (\texttt{ped\_dist\_head}), reducing vehicle+pedestrian co-presence depth MAE from $14.8 \to 2.64$\,m. Because a single front camera ($90^\circ$ FOV) observes forward-lateral adjacent lanes ($x \in [0, 12]$\,m) and cannot see the rear flank ($x \in [-10, 0)$\,m), the 30-frame ($1.5$\,s) latch is a partial mitigation for previously seen vehicles ($3/3$ in \texttt{FSD-7}), whereas unobserved rear-approaching vehicles ($0/2$ in \texttt{vision\_estimated} vs.\ $1/2$ in \texttt{gt} BSM) require rear/corner sensors. When \texttt{--shield-mode on} is active, Rule~1 forces $u_{\text{tb}} = -1.0$ if $\hat{p}_{\text{AEB}} \ge 0.70$, $\text{TL}=\texttt{red}$, $d_{\text{ped}} \le 16.0$\,m, or $d_{\text{lead}} \le 11.5$\,m; Rule~2 blocks unsafe lane changes if $\max_c \hat{p}^{(m)}_c < 0.80$, $\texttt{adj\_wp.lane\_id} \times \texttt{wp.lane\_id} \le 0$ \cite{dupuis2010opendrive}, or $\text{BS}_{\text{L/R}}$ is active.
+Table~\ref{tab:params} lists all input sources (\texttt{scripts/04\_evaluate\_sim.py}). Under \texttt{vision\_estimated}, 1-step ($\Delta t=0.05$\,s) differencing turns $1$\,m depth noise into $72$\,km/h spikes ($9.62$\,km/h RMS jitter after $\beta=0.35$ EMA). We fit a $K_w=5$-step ($W=0.25$\,s) OLS slope $\hat{\dot{d}}_{\text{reg},t}$ \cite{savitzky1964smoothing,kalman1960new} ($10\times$ lower noise variance), fuse $\hat{\dot{d}}_{\text{vis},t}$, reset the window on target jumps $|\hat{d}_{\text{lead},t} - \hat{d}_{\text{lead},t-1}| > 6.0$\,m, and apply $\beta=0.35$ EMA (cutting jitter RMS $9.62 \to 1.84$\,km/h, $\text{MAE}: 6.85 \to 2.41$\,km/h, cut-in recovery $0.15$\,s / $3$ frames, hard-brake lag $0.10$\,s / $2$ frames in \texttt{FSD-6}), while \texttt{ped\_dist\_head} $\hat{d}_{\text{ped},t}$ decouples pedestrian range from lead vehicles (co-presence MAE $14.8 \to 2.64$\,m):
+\begin{align}
+    \hat{\dot{d}}_{\text{reg},t} &= \frac{\sum_{j=-2}^{2} j\,\hat{d}_{\text{lead},t-2+j}}{10\Delta t}, \; \hat{\dot{d}}_t = 0.70\hat{\dot{d}}_{\text{reg},t} + 0.30\hat{\dot{d}}_{\text{vis},t}, \\
+    \hat{v}_{\text{lead},t} &= \text{clip}\big((1-\beta)\hat{v}_{\text{lead},t-1} + \beta(v_{\text{ego},t} + 3.6\hat{\dot{d}}_t), 0, 60\big).
+\end{align}
+Front FOV ($90^\circ$) covers $x \in [0, 12]$\,m, so the 30-frame ($1.5$\,s) latch holds previously seen flank cars ($3/3$ in \texttt{FSD-7}) but is blind to rear approach from $x_0 = -15$\,m ($0/2$ Vis vs.\ $1/2$ \texttt{gt} BSM). Rule~1 (\texttt{--shield-mode on}) sets $u_{\text{tb}} = -1.0$ if $\hat{p}_{\text{AEB}} \ge 0.70$, $\text{TL}=\texttt{red}$, $d_{\text{ped}} \le 16.0$\,m, or $d_{\text{lead}} \le 11.5$\,m; Rule~2 cancels lane changes if $\max_c \hat{p}^{(m)}_c < 0.80$, $\texttt{adj\_wp.lane\_id} \times \texttt{wp.lane\_id} \le 0$ \cite{dupuis2010opendrive}, or $\text{BS}_{\text{L/R}}$ is latched.
 
-For lane transitions, $N_b = 14$ waypoints are sampled at $2.0$\,m spacing ahead of the ego axle ($d_0 = 0$\,m) at $d_k = 2.0(k+1)$\,m for $k \in \{0,\dots,13\}$ ($d_0=2.0$\,m to $d_{13}=28.0$\,m, spanning $26.0$\,m between $P_0$ and $P_{13}$ and $28.0$\,m total lookahead from the ego origin with $\tau_k = (k+1)/N_b$), blended via $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ \cite{flash1985coordination,werling2010optimal}:
+For lane transitions, $N_b = 14$ nodes are sampled $2.0$\,m apart ahead of the ego axle ($d_0 = 0$\,m) at $d_k = 2.0(k+1)$\,m for $k \in \{0,\dots,13\}$ ($d_0=2.0$\,m to $d_{13}=28.0$\,m; $26.0$\,m between $P_0$ and $P_{13}$, $28.0$\,m lookahead from origin, $\tau_k = (k+1)/N_b$) via $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ \cite{flash1985coordination,werling2010optimal}:
 \begin{align}
     s(\tau) &= 10\tau^3 - 15\tau^4 + 6\tau^5, \\
     P^{\text{blend}}_k &= \big(1 - s(\tau_k)\big) P^{\text{orig}}_k + s(\tau_k) P^{\text{adj}}_k.
 \end{align}
-While the continuous envelope satisfies $s'(0)=s'(1)=s''(0)=s''(1)=0$, runtime tracking projects onto the discrete $2.0$\,m piecewise-linear polyline $\overline{P^{\text{blend}}_k P^{\text{blend}}_{k+1}}$, which bounds node-to-node heading steps ($|\Delta\psi_k| \le 1.9^\circ$) rather than enforcing analytic $C^2$ continuity between nodes, with lookahead $L_{\text{look}} = \text{clip}(7.5 + 0.18 v_{\text{kmh}}, 7.5, 13.5)$\,m \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}. Map field \texttt{road\_curvature} stores right-handed heading change $\Delta\psi_{\text{arc}}$ over $L_{\text{arc}} = 22.2$\,m, so signed left-positive curvature is $\kappa_{\text{map}} = -\Delta\psi_{\text{arc}}/L_{\text{arc}} = -0.045\,\texttt{road\_curvature}$ ($\text{m}^{-1}$). Fusing $\kappa_{\text{map}}$ with waypoint $k=3$ ($t=1.5$\,s, $(\hat{x}_3, \hat{y}_3)$) curvature $\kappa_{\text{traj}}$ ($L=2.85$\,m, $\delta_{\max}=0.70$\,rad, $k_{\text{FF}}=0.12$) yields:
+Envelope $s'(0)=s'(1)=s''(0)=s''(1)=0$, while pure pursuit projects onto the $2.0$\,m piecewise-linear polyline $\overline{P^{\text{blend}}_k P^{\text{blend}}_{k+1}}$, bounding discrete heading steps ($|\Delta\psi_k| \le 1.9^\circ$) rather than analytic $C^2$ continuity between nodes, with $L_{\text{look}} = \text{clip}(7.5 + 0.18 v_{\text{kmh}}, 7.5, 13.5)$\,m \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}. With $\kappa_{\text{map}} = -\Delta\psi_{\text{arc}}/L_{\text{arc}} = -0.045\,\texttt{road\_curvature}$ ($\text{m}^{-1}$, $L_{\text{arc}} = 22.2$\,m), node $k=3$ ($t=1.5$\,s, $(\hat{x}_3, \hat{y}_3)$), $L=2.85$\,m, $\delta_{\max}=0.70$\,rad, $k_{\text{FF}}=0.12$, and CTH-ACC ($d_{\text{lead}} < 38$\,m, $v_{\text{lead}} \ge 8$\,km/h, $d_0 = 8.0$\,m, $\tau_h = 1.2$\,s, $k_g = 0.85$\,(km/h)/m $\equiv 0.236\,\text{s}^{-1}$) \cite{ioannou1993autonomous,rajamani2001experimental,treiber2000congested}:
 \begin{align}
     \kappa_{\text{traj}} &= \frac{2(\hat{y}_3 - e_y)}{\max(3.5, \hat{x}_3)^2 + (\hat{y}_3 - e_y)^2}, \\
     \kappa_{\text{eff}} &= 0.70(-0.045\,\texttt{road\_curvature}) + 0.30\kappa_{\text{traj}}, \\
     \delta_{\text{raw}} &= \text{clip}\!\left(\delta_{\text{PID}}(e_y, e_\psi) + k_{\text{FF}}\frac{\arctan(L\kappa_{\text{eff}})}{\delta_{\max}}, -1, 1\right), \\
-    \Delta \delta_{\max} &= \frac{1.1\Delta t}{1 + 0.012 v_{\text{kmh}}}, \\
-    \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{raw}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big).
-\end{align}
-True constant-time-headway (CTH) ACC ($d_{\text{lead}} < 38$\,m, $v_{\text{lead}} \ge 8$\,km/h, $d_0 = 8.0$\,m, $\tau_h = 1.2$\,s, $k_g = 0.85$\,(km/h)/m $\equiv 0.236\,\text{s}^{-1}$) \cite{ioannou1993autonomous,rajamani2001experimental,treiber2000congested} follows:
-\begin{align}
-    d^*(v_{\text{ego,kmh}}) &= d_0 + \tau_h \left(\frac{v_{\text{ego,kmh}}}{3.6}\right), \\
-    v_{\text{raw}} &= v_{\text{lead}} + k_g \big(d_{\text{lead}} - d^*(v_{\text{ego,kmh}})\big), \\
-    v_{\text{ACC}} &= \text{clip}\!\big(v_{\text{raw}},\, 0.0,\, \min(35.0,\, v_{\text{lead}} + 6.0)\big).
+    \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{raw}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big), \\
+    d^*(v_{\text{ego}}) &= d_0 + \tau_h (v_{\text{ego}}/3.6), \; v_{\text{raw}} = v_{\text{lead}} + k_g(d_{\text{lead}} - d^*), \\
+    v_{\text{ACC}} &= \text{clip}\big(v_{\text{raw}},\, 0.0,\, \min(35.0,\, v_{\text{lead}} + 6.0)\big).
 \end{align}
 \begin{scriptsize}
 \begin{verbatim}
-# src/control/shield_pid.py
+# scripts/04_evaluate_sim.py & src/control/shield_pid.py
+if lead_d_window and abs(pred_d - lead_d_window[-1]) > 6.0:
+    lead_d_window = [pred_d]
+dd_dt_fused = 0.70 * dd_dt_reg + 0.30 * pred_rr_mps
+raw_v_lead = ego_v_kmh + 3.6 * dd_dt_fused
+est_v_lead = float(np.clip(0.65*prev_v + 0.35*raw_v_lead, 0, 60))
 d_star = 8.0 + 1.2 * (current_speed_kmh / 3.6)
 acc_cap = min(35.0, lead_speed_kmh + 6.0)
 raw_acc = lead_speed_kmh + 0.85 * (lead_distance_m - d_star)
@@ -210,9 +176,36 @@ Scenario & Paired Weather & Event & 10-Ep (Vis/GT) & 50-Ep (Vis/GT) \\
 }
 \end{table}
 
+\begin{table*}[t]
+\centering
+\caption{Closed-loop evaluation separating zero-actor-query \texttt{vision\_estimated} perception from simulator \texttt{gt} state (\texttt{checkpoints/eval\_metrics\_carla.json}).}
+\label{tab:main_results}
+\resizebox{0.98\textwidth}{!}{%
+\begin{tabular}{llcccc}
+\toprule
+Simulator & Metric & Target KPI & \texttt{vision\_estimated} Mode (No Sim Actor Query) & \texttt{gt} State Hybrid Mode & Status \\
+\midrule
+\multirow{7}{*}{CARLA 0.9.16} 
+ & Single-Frame Latency ($32.40$\,ms neural + $0.45$\,ms ctrl; $+6.40$\,ms sim IPC) & $\le 40.0\,\text{ms}$ & 32.85\,ms (30.4\,FPS, P95: 33.96\,ms) & 32.85\,ms (31.67\,ms w/o aux+traj) & PASS \\
+ & \texttt{Town10HD\_Opt}: 10 Paired Eps ($680$\,m) / 50 Cross-Weather ($3,400$\,m) & $\ge 85.0\%$ & 100.0\% (10/10) / 94.0\% (47/50, 3-seed $46.7\pm 0.6$) & 100.0\% (10/10) / 98.0\% (49/50) & PASS \\
+ & \texttt{Town10HD\_Opt}: 10 Multi-Block Long Routes ($200$\,m/ep, $2,000$\,m) & $\ge 85.0\%$ & 90.0\% (9/10, $R_c=95.4\%$) & 100.0\% (10/10, $R_c=100.0\%$) & PASS \\
+ & \texttt{Town03} Unseen Map ($10\times 200$\,m Roundabout/Grade, $2,000$\,m) & $\ge 80.0\%$ & 80.0\% (8/10, $R_c=91.2\%$, $\overline{|e_y|}=0.112$\,m) & 90.0\% (9/10, $R_c=96.5\%$) & PASS \\
+ & Stress Test: $10\%$ Frame Drop + $25\%$ Patch Occlusion (50-Ep) & $\ge 80.0\%$ & 88.0\% (44/50, $\Delta V_t/\Delta n_t$ + latch active) & 94.0\% (47/50) & PASS \\
+ & Teacher $\text{ECE}_{\text{mean}}$ / Physical $\text{ECE}_{\text{phys}}$ / $\text{HCER}_{0.90,\text{AEB}}$ / Physical $\text{FNR}_{\text{AEB}}$ & $\le 0.0500$ & $0.0142$ / $0.0318$ / $0.45\%$ ($1.12\%$ all) / $1/48$ ($2.1\%$) & $0.0000$ / $0.0110$ / $0.10\%$ / $0/48$ & PASS \\
+ & Lead Depth MAE / Co-Pres Ped MAE / Speed Jitter RMS / $\overline{|e_y|}$ & $\le 5.0$\,m / $\le 0.25$\,m & $3.23$\,m / $2.64$\,m / $1.84$\,km/h / $0.094$\,m & $0.0$\,m / $0.0$\,m / $0.0$\,km/h / $0.085$\,m & PASS \\
+\midrule
+\multirow{3}{*}{MetaDrive 0.4.3 ($\Delta t=0.05$\,s)} 
+ & Single-Frame Latency ($\bar{v}=33.0$\,km/h, $190.4$\,m \& $415.3$ steps/ep) & $\le 40.0\,\text{ms}$ & 30.20\,ms (33.1\,FPS, P95: 31.67\,ms) & 30.20\,ms (33.1\,FPS) & PASS \\
+ & Arrival: 10-Ep ($4,153$ steps, $1,904$\,m) / 50-Ep ($20,765$ steps, $9,520$\,m) & $\ge 85.0\%$ & 100.0\% (10/10) / 96.0\% (48/50, CI $[86.3, 99.5]\%$) & 100.0\% (10/10) / 100.0\% (50/50; 98.7\% arc) & PASS \\
+ & Unseen Closed-Loop Test $\text{ECE}_{\text{mean}}$ / NLL / Brier ($M=15$ Bins) & $\le 0.0500$ & $0.0184$ / $0.096$ / $0.031$ (Noisy Sensor) & $0.0000$ / $0.041$ / $0.012$ (GT Teacher) & PASS \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
+
 \begin{table}[t]
 \centering
-\caption{CARLA 0.9.16 architecture, baseline, and latency ablations with 3-seed $\text{mean}\pm\text{std}$ and paired two-sided McNemar $p$-values vs.\ \texttt{vision\_estimated} DINOv2+Laya (Part~A), plus hybrid trajectory/controller ablations (Part~B). Continuous metrics and 10-Ep AEB counts are measured on the 10-episode paired suite ($5$ physical hazard events; sustained AEB event defined as $\ge 3$ contiguous ticks with $u_{\text{tb}}\le -0.50$ bridging $\le 2$-tick gaps, while isolated $1$--$2$ tick transients count in ticks only; in Full $44$ TP ticks = $39$ model $\hat{p}_{\text{AEB}}\ge 0.70$ + $5$ shield lead/ped triggers).}
+\caption{CARLA 0.9.16 ablations: 3-seed $\text{mean}\pm\text{std}$ and paired two-sided McNemar $p$-values \cite{mcnemar1947note} vs.\ \texttt{vision\_estimated} DINOv2+Laya (Part~A); hybrid trajectory/controller ablations (Part~B). Continuous and 10-Ep AEB metrics are from the 10-Ep paired suite ($5$ hazard events; AEB event = $\ge 3$ contiguous ticks with $u_{\text{tb}}\le -0.50$ bridging $\le 2$-tick gaps; $1$--$2$ tick transients count in ticks only; Full $44$ TP ticks = $39$ model $\hat{p}_{\text{AEB}}\ge 0.70$ + $5$ shield triggers).}
 \label{tab:ablation}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lcccccc}
@@ -251,12 +244,23 @@ All Removed (Discrete 2\,m Step WPs + Fixed-Gap ACC) & 10/10 & 35/50 ($70.0\%$) 
 
 \section{Experiments, Latency Breakdown, and Limitations}
 \label{sec:exp}
-Closed-loop benchmarks were executed on an AMD Ryzen~5 7500F (6C/12T) and NVIDIA GeForce RTX~4070~Ti (12\,GB) workstation in MetaDrive 0.4.3 \cite{li2022metadrive} ($\Delta t = 0.05$\,s control step via \texttt{decision\_repeat=5}; $415.3$ steps / $190.4$\,m per episode at $\bar{v}=33.0$\,km/h, totaling $20,765$ steps / $9,520$\,m across $N=50$ unseen maps) and live CARLA 0.9.16 \cite{dosovitskiy2017carla} (\texttt{Town10HD\_Opt} and unseen \texttt{Town03}, $20$\,Hz synchronous A* \texttt{GlobalRoutePlanner} \cite{hart1968formal}). Between MetaDrive and CARLA, the $196\times 392$ crop/resize pipeline, frozen DINOv2+Laya weights, \texttt{projector\_best.pt}, temperatures $(0.05,0.05,0.10)$, CTH-ACC law, and 14-WP quintic spline are kept identical without retraining, whereas vertical FOV ($90^\circ$ CARLA vs.\ $65^\circ$ MetaDrive) and map waypoint APIs are adapted per simulator. Per-stage latency measured across the same $1,981$ frames with per-stage \texttt{torch.cuda.synchronize()} (\texttt{checkpoints/eval\_metrics\_carla.json}):
+Runs used an AMD Ryzen~5 7500F (6C/12T) and RTX~4070~Ti (12\,GB) in MetaDrive 0.4.3 \cite{li2022metadrive} ($\Delta t = 0.05$\,s, \texttt{decision\_repeat=5}; $415.3$ steps / $190.4$\,m per run at $\bar{v}=33.0$\,km/h, $20,765$ steps / $9,520$\,m over $N=50$ unseen maps) and CARLA 0.9.16 \cite{dosovitskiy2017carla} (\texttt{Town10HD\_Opt} and \texttt{Town03}, $20$\,Hz A* \texttt{GlobalRoutePlanner} \cite{hart1968formal}). Both share identical $196\times 392$ crop/resize, frozen DINOv2+Laya, \texttt{projector\_best.pt}, $(0.05,0.05,0.10)$ temperatures, CTH-ACC, and 14-node quintic code without retraining; only vertical FOV ($90^\circ$ vs.\ $65^\circ$) and map APIs differ. Stage timings across $1,981$ synchronized frames (\texttt{checkpoints/eval\_metrics\_carla.json}):
 \begin{scriptsize}
 \begin{verbatim}
-{"simulator": "carla", "episodes": 10, "total_frames": 1981,
- "mean_latency_ms": 32.85, "mean_neural_latency_ms": 32.40,
- "base_stack_latency_ms": 31.67, "sim_tick_ipc_transport_ms": 6.40,
+{"simulator": "carla", "ablation_mode": "full", "episodes": 10,
+ "total_frames": 1981, "mean_latency_ms": 32.85,
+ "mean_neural_latency_ms": 32.40, "base_stack_latency_ms": 31.67,
+ "sim_tick_ipc_transport_ms": 6.40, "p95_latency_ms": 33.96,
+ "open_loop_traj_collision_rate_pct": 3.8,
+ "counterfactual_obstacle_shift_m": {
+   "within_lane_keep_lane_dy6_m": 0.12,
+   "lane_change_triggered_dy6_m": 3.41},
+ "vision_aux_lead_mae_m": 3.23, "vision_ped_copres_mae_m": 2.64,
+ "vision_lead_speed_5step_ols": {"window_steps": 5,
+   "jitter_rms_kmh": 1.84, "lead_speed_mae_kmh": 2.41,
+   "cutin_recovery_s": 0.15, "braking_lag_s": 0.10},
+ "physical_hazard_calibration": {"teacher_ece": 0.0142,
+   "physical_ece": 0.0318, "hcer_090_aeb_pct": 0.45},
  "stage_latency_breakdown_ms": {
    "preprocess_crop_resize": 0.42, "dinov2_vit_b14_frozen": 16.43,
    "spatial_projector_core_and_temporal": 0.82,
@@ -266,7 +270,7 @@ Closed-loop benchmarks were executed on an AMD Ryzen~5 7500F (6C/12T) and NVIDIA
    "safety_shield_bicycle_ff_pid": 0.45}}
 \end{verbatim}
 \end{scriptsize}
-All seven stages sum to $32.85$\,ms ($32.40$\,ms neural + $0.45$\,ms control), and omitting \texttt{auxiliary\_perception\_head} ($0.49$\,ms) and \texttt{trajectory\_head\_6wp} ($0.69$\,ms) yields $31.67$\,ms base latency ($39.25$\,ms total loop with $6.40$\,ms CARLA IPC $< 50$\,ms budget). In Table~\ref{tab:ablation}, an AEB event is defined reproducibly as $\ge 3$ contiguous ticks ($\ge 0.15$\,s) with $u_{\text{tb}} \le -0.50$ (bridging $\le 2$-tick gaps); isolated $1$--$2$ tick transients are counted in the tick total but equal $0$ sustained events (hence `5/0 (44/2)` in Full has $2$ isolated FP ticks and $0$ FP events, and $44$ TP ticks comprise $39$ model-initiated $\hat{p}_{\text{AEB}}\ge 0.70$ ticks plus $5$ shield lead/ped distance triggers). Paired two-sided McNemar tests show significant gains ($p < 0.01$) for DINOv2+Laya ($47/50$) over \texttt{mlp\_head} ($39/50, p=0.0078$), \texttt{expert\_rule\_policy} ($38/50, p=0.0039$), \texttt{random\_laya} ($36/50, p=0.0010$), and \texttt{prompt\_only} ($33/50, p=0.0001$), while the 5-episode margin over the 2-layer trainable Transformer ($42/50$, $p=0.0625$ two-sided, $p=0.0313$ one-sided) reflects an observed advantage on night/rain hazards. Removing $\Delta\hat{\tau}$ ($45/50$), $\kappa_{\text{traj}}$ ($44/50$), or $\kappa_{\text{map}}$ ($41/50$) confirms that closed-loop reliability arises from the hybrid synergy of visual inference, HD-map priors, and CTH-ACC/quintic control.
+All seven stages sum to $32.85$\,ms ($32.40$\,ms neural + $0.45$\,ms control), and dropping \texttt{auxiliary\_perception\_head} ($0.49$\,ms) + \texttt{trajectory\_head\_6wp} ($0.69$\,ms) gives $31.67$\,ms base ($39.25$\,ms loop with $6.40$\,ms CARLA IPC $< 50$\,ms). In Table~\ref{tab:ablation}, an AEB event is $\ge 3$ contiguous ticks ($\ge 0.15$\,s) with $u_{\text{tb}} \le -0.50$ (bridging $\le 2$-tick gaps; $1$--$2$ tick transients count in ticks only, so `5/0 (44/2)` in Full has $2$ isolated FP ticks and $0$ FP events, and $44$ TP ticks = $39$ model $\hat{p}_{\text{AEB}}\ge 0.70$ ticks + $5$ shield triggers). Two-sided McNemar \cite{mcnemar1947note} tests give $p < 0.01$ for DINOv2+Laya ($47/50$) over \texttt{mlp\_head} ($39/50, p=0.0078$), \texttt{expert\_rule\_policy} ($38/50, p=0.0039$), \texttt{random\_laya} ($36/50, p=0.0010$), and \texttt{prompt\_only} ($33/50, p=0.0001$); $47/50$ vs.\ $42/50$ over the 2-layer Transformer ($b=5, c=0$, $p=0.0625$ two-sided, $p=0.0313$ one-sided) is an observed edge on night/rain episodes, and dropping $\Delta\hat{\tau}$ ($45/50$), $\kappa_{\text{traj}}$ ($44/50$), or $\kappa_{\text{map}}$ ($41/50$) confirms the hybrid design.
 
 \nocite{*}
 \bibliographystyle{plain}
