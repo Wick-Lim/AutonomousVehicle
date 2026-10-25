@@ -352,7 +352,7 @@ def main() -> None:
         controller.reset()
         done = False
         ar_decision_queue: List[Dict[str, Any]] = []
-        prev_pred_d: float | None = None
+        lead_d_window: List[float] = []
         prev_est_v_lead: float = 35.0
         bs_left_latch: int = 0
         bs_right_latch: int = 0
@@ -421,15 +421,43 @@ def main() -> None:
 
             ctrl_telemetry = dict(telemetry)
             if args.perception_mode == "vision_estimated" and aux_p:
-                # Replace all simulator actor queries with AuxiliaryPerceptionHead + odometry finite-difference estimates
+                # Replace all simulator actor queries with AuxiliaryPerceptionHead + 5-step (0.25s) least-squares range-rate fusion
                 pred_d = float(aux_p["pred_lead_distance_m"][0].item())
+                pred_ped_d = float(
+                    aux_p.get("pred_ped_distance_m", aux_p["pred_lead_distance_m"])[0].item()
+                )
+                pred_rr_mps = (
+                    float(aux_p["pred_range_rate_mps"][0].item())
+                    if "pred_range_rate_mps" in aux_p
+                    else 0.0
+                )
                 ego_v_kmh = float(telemetry.get("speed_kmh", 0.0))
-                if prev_pred_d is None:
-                    est_v_lead = ego_v_kmh
+
+                # Reset window on discrete target switches (cut-in / lead departure > 6.0 m)
+                if lead_d_window and abs(pred_d - lead_d_window[-1]) > 6.0:
+                    lead_d_window = [pred_d]
                 else:
-                    raw_v_lead = ego_v_kmh + 3.6 * ((pred_d - prev_pred_d) / 0.05)
-                    est_v_lead = float(np.clip(0.65 * prev_est_v_lead + 0.35 * raw_v_lead, 0.0, 60.0))
-                prev_pred_d = pred_d
+                    lead_d_window.append(pred_d)
+                    if len(lead_d_window) > 5:
+                        lead_d_window.pop(0)
+
+                if len(lead_d_window) < 2:
+                    dd_dt_reg = pred_rr_mps
+                else:
+                    n_w = len(lead_d_window)
+                    t_idx = np.arange(n_w, dtype=np.float64) * 0.05
+                    t_mean = float(t_idx.mean())
+                    d_arr = np.asarray(lead_d_window, dtype=np.float64)
+                    dd_dt_reg = float(
+                        np.sum((t_idx - t_mean) * (d_arr - d_arr.mean()))
+                        / max(1e-6, float(np.sum((t_idx - t_mean) ** 2)))
+                    )
+
+                dd_dt_fused = 0.70 * dd_dt_reg + 0.30 * pred_rr_mps
+                raw_v_lead = ego_v_kmh + 3.6 * dd_dt_fused
+                est_v_lead = float(
+                    np.clip(0.65 * prev_est_v_lead + 0.35 * raw_v_lead, 0.0, 60.0)
+                )
                 prev_est_v_lead = est_v_lead
 
                 tl_idx = int(aux_p["pred_traffic_light_idx"][0].item())
@@ -443,7 +471,7 @@ def main() -> None:
                 prev_vision_tel = {
                     "lead_distance_m": pred_d,
                     "lead_speed_kmh": est_v_lead,
-                    "pedestrian_distance_m": pred_d if hz_str == "pedestrian" else 100.0,
+                    "pedestrian_distance_m": pred_ped_d if (hz_str == "pedestrian" or pred_ped_d < 35.0) else 100.0,
                     "lane_offset_m": float(aux_p["pred_lane_offset_m"][0].item()),
                     "traffic_light": tl_str,
                     "hazard_source": hz_str,

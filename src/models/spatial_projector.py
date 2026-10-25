@@ -29,6 +29,8 @@ class AuxiliaryPerceptionHead(nn.Module):
             nn.GELU(),
         )
         self.lead_dist_head = nn.Linear(hidden_dim, 1)
+        self.ped_dist_head = nn.Linear(hidden_dim, 1)
+        self.range_rate_head = nn.Linear(hidden_dim, 1)
         self.lane_offset_head = nn.Linear(hidden_dim, 1)
         self.traffic_light_head = nn.Linear(hidden_dim, len(TRAFFIC_LIGHT_CLASSES))
         self.hazard_head = nn.Linear(hidden_dim, len(HAZARD_SOURCE_CLASSES))
@@ -56,6 +58,8 @@ class AuxiliaryPerceptionHead(nn.Module):
         h = self.shared_mlp(regional_concat)
 
         raw_dist = torch.sigmoid(self.lead_dist_head(h)).squeeze(-1) * 80.0
+        raw_ped_dist = torch.sigmoid(self.ped_dist_head(h)).squeeze(-1) * 60.0
+        raw_range_rate = torch.tanh(self.range_rate_head(h)).squeeze(-1) * 15.0
         raw_offset = torch.tanh(self.lane_offset_head(h)).squeeze(-1) * 3.5
         tl_logits = self.traffic_light_head(h)
         haz_logits = self.hazard_head(h)
@@ -69,12 +73,22 @@ class AuxiliaryPerceptionHead(nn.Module):
                 dtype=torch.float32,
                 device=device,
             )
+            prior_ped_dist = torch.tensor(
+                [float(t.get("pedestrian_distance_m", 100.0)) for t in telemetries],
+                dtype=torch.float32,
+                device=device,
+            )
             prior_offset = torch.tensor(
                 [float(t.get("lane_offset_m", 0.0)) for t in telemetries],
                 dtype=torch.float32,
                 device=device,
             )
             pred_lead_dist = 0.85 * prior_dist + 0.15 * raw_dist
+            pred_ped_dist = torch.where(
+                prior_ped_dist < 60.0,
+                0.85 * prior_ped_dist + 0.15 * raw_ped_dist,
+                raw_ped_dist,
+            )
             pred_lane_offset = 0.85 * prior_offset + 0.15 * raw_offset
 
             tl_prior = torch.zeros_like(tl_logits)
@@ -97,6 +111,7 @@ class AuxiliaryPerceptionHead(nn.Module):
             bs_probs = 0.85 * bs_prior + 0.15 * bs_probs
         else:
             pred_lead_dist = raw_dist
+            pred_ped_dist = raw_ped_dist
             pred_lane_offset = raw_offset
 
         tl_probs = F.softmax(tl_logits, dim=-1)
@@ -104,6 +119,8 @@ class AuxiliaryPerceptionHead(nn.Module):
 
         return {
             "pred_lead_distance_m": pred_lead_dist,
+            "pred_ped_distance_m": pred_ped_dist,
+            "pred_range_rate_mps": raw_range_rate,
             "pred_lane_offset_m": pred_lane_offset,
             "pred_traffic_light_logits": tl_logits,
             "pred_traffic_light_probs": tl_probs,

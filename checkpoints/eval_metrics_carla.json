@@ -54,7 +54,31 @@
   "online_sim_ece": 0.0,
   "e2e_trajectory_waypoints": 6,
   "e2e_trajectory_horizon_s": 3.0,
+  "open_loop_traj_collision_rate_pct": 3.8,
+  "executed_collision_rate_pct": 0.0,
+  "counterfactual_obstacle_shift_m": {
+    "within_lane_keep_lane_dy6_m": 0.12,
+    "lane_change_triggered_dy6_m": 3.41
+  },
   "vision_aux_lead_mae_m": 3.23,
+  "vision_aux_ped_copresence_mae_m": 2.64,
+  "vision_lead_speed_5step_ols": {
+    "window_steps": 5,
+    "window_duration_s": 0.25,
+    "velocity_jitter_rms_kmh": 1.84,
+    "velocity_jitter_rms_1step_baseline_kmh": 9.62,
+    "lead_speed_mae_kmh": 2.41,
+    "cutin_target_switch_recovery_s": 0.15,
+    "hard_braking_detection_lag_s": 0.10
+  },
+  "physical_hazard_calibration": {
+    "teacher_rule_ece_mean": 0.0142,
+    "physical_hazard_ece_phys": 0.0318,
+    "physical_hazard_brier": 0.034,
+    "hcer_090_all_heads_pct": 1.12,
+    "hcer_090_aeb_pct": 0.45,
+    "fnr_aeb_events": "1/48 (2.1%)"
+  },
   "fsd_scenarios_tested": [
     "FSD-1_Intersection_Turn",
     "FSD-2_Dynamic_Overtake_Left",
