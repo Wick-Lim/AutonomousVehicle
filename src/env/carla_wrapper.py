@@ -307,34 +307,84 @@ class CarlaWrapper:
                     break
 
     def _update_spectator_chase_cam(self) -> None:
-        """Position the main CarlaUE4.exe 3D Spectator camera behind the ego vehicle."""
+        """Position the main CarlaUE4.exe 3D Spectator camera behind the ego vehicle with gimbal smoothing."""
         if self._world is None or self._ego_vehicle is None:
             return
         try:
             carla = self._carla_mod
             ego_tf = self._ego_vehicle.get_transform()
-            fwd = ego_tf.get_forward_vector()
-            cam_loc = carla.Location(
-                x=ego_tf.location.x - fwd.x * 6.5,
-                y=ego_tf.location.y - fwd.y * 6.5,
-                z=ego_tf.location.z + 2.8,
-            )
-            cam_rot = carla.Rotation(
-                pitch=-12.0,
-                yaw=ego_tf.rotation.yaw,
-                roll=0.0,
-            )
+            ego_yaw_deg = float(ego_tf.rotation.yaw)
+            prev_cam = getattr(self, "_spectator_cam_state", None)
+            if prev_cam is None:
+                sm_yaw_deg = ego_yaw_deg
+                fwd = ego_tf.get_forward_vector()
+                sm_x = float(ego_tf.location.x - fwd.x * 6.5)
+                sm_y = float(ego_tf.location.y - fwd.y * 6.5)
+                sm_z = float(ego_tf.location.z + 2.8)
+            else:
+                px, py, pz, pyaw_deg = prev_cam
+                # Wrap angle difference in degrees for smooth yaw interpolation
+                dyaw = ((ego_yaw_deg - pyaw_deg + 180.0) % 360.0) - 180.0
+                sm_yaw_deg = pyaw_deg + 0.22 * dyaw
+                sm_yaw_rad = math.radians(sm_yaw_deg)
+                target_x = float(ego_tf.location.x - math.cos(sm_yaw_rad) * 6.5)
+                target_y = float(ego_tf.location.y - math.sin(sm_yaw_rad) * 6.5)
+                target_z = float(ego_tf.location.z + 2.8)
+                sm_x = px + 0.35 * (target_x - px)
+                sm_y = py + 0.35 * (target_y - py)
+                sm_z = pz + 0.35 * (target_z - pz)
+
+            self._spectator_cam_state = (sm_x, sm_y, sm_z, sm_yaw_deg)
+            cam_loc = carla.Location(x=sm_x, y=sm_y, z=sm_z)
+            cam_rot = carla.Rotation(pitch=-12.0, yaw=sm_yaw_deg, roll=0.0)
             self._world.get_spectator().set_transform(carla.Transform(cam_loc, cam_rot))
         except Exception:
             pass
 
+    @staticmethod
+    def _compute_polyline_tangents(
+        xyz_list: List[Tuple[float, float, float]]
+    ) -> List[Tuple[float, float, float, float]]:
+        """Attach continuous forward tangent yaw_rad to a list of (x, y, z) 3D points."""
+        n = len(xyz_list)
+        if n == 0:
+            return []
+        pts: List[Tuple[float, float, float, float]] = []
+        for i in range(n):
+            x, y, z = xyz_list[i]
+            if i + 1 < n:
+                nx, ny, _ = xyz_list[i + 1]
+                yaw = math.atan2(ny - y, nx - x)
+            elif i > 0:
+                px, py, _ = xyz_list[i - 1]
+                yaw = math.atan2(y - py, x - px)
+            else:
+                yaw = 0.0
+            pts.append((float(x), float(y), float(z), float(yaw)))
+        return pts
+
+    def _rebuild_route_pts(self) -> None:
+        """Build continuous 3D polyline `self._route_pts` from `self._route_waypoints`."""
+        wps = getattr(self, "_route_waypoints", [])
+        xyz = [
+            (
+                float(w.transform.location.x),
+                float(w.transform.location.y),
+                float(w.transform.location.z),
+            )
+            for w in wps
+        ]
+        self._route_pts: List[Tuple[float, float, float, float]] = (
+            self._compute_polyline_tangents(xyz)
+        )
+
     def _switch_route_to_adjacent_lane(self, direction: str) -> bool:
-        """Switch remaining route waypoints to adjacent same-direction lane ('left' or 'right') with linear offset ramp."""
+        """Switch route to adjacent lane ('left' or 'right') via Minimum-Jerk Quintic S-Curve trajectory."""
         if not getattr(self, "_route_waypoints", None) or self._carla_mod is None:
             return False
         carla = self._carla_mod
-        pivot_idx = min(len(self._route_waypoints) - 1, self._route_wp_idx + 2)
-        pivot_wp = self._route_waypoints[pivot_idx]
+        start_idx = min(len(self._route_waypoints) - 1, self._route_wp_idx + 1)
+        pivot_wp = self._route_waypoints[start_idx]
         adj_wp = (
             pivot_wp.get_left_lane()
             if direction == "left"
@@ -347,18 +397,157 @@ class CarlaWrapper:
         ):
             return False
 
-        new_chain = list(self._route_waypoints[:pivot_idx]) + [adj_wp]
+        # Generate adjacent lane chain starting from pivot_wp
+        adj_chain = [adj_wp]
         curr_wp = adj_wp
-        for _ in range(75):
+        for _ in range(80):
             nxt = curr_wp.next(2.0)
             if not nxt:
                 break
             curr_wp = nxt[0]
-            new_chain.append(curr_wp)
-        self._route_waypoints = new_chain
+            adj_chain.append(curr_wp)
+
+        orig_chain = self._route_waypoints[start_idx:]
+        n_blend = min(14, len(orig_chain), len(adj_chain))  # 28m smooth S-curve transition
+        prefix_xyz = [
+            (p[0], p[1], p[2]) for p in getattr(self, "_route_pts", [])[:start_idx]
+        ]
+        blended_xyz: List[Tuple[float, float, float]] = []
+        for k in range(len(adj_chain)):
+            al = adj_chain[k].transform.location
+            if k < n_blend:
+                ol = orig_chain[k].transform.location
+                tau = float(k) / float(max(1, n_blend - 1))
+                # Minimum-jerk quintic polynomial: s(tau) = 10*tau^3 - 15*tau^4 + 6*tau^5
+                s = (tau**3) * (10.0 + tau * (-15.0 + 6.0 * tau))
+                bx = (1.0 - s) * float(ol.x) + s * float(al.x)
+                by = (1.0 - s) * float(ol.y) + s * float(al.y)
+                bz = (1.0 - s) * float(ol.z) + s * float(al.z)
+                blended_xyz.append((bx, by, bz))
+            else:
+                blended_xyz.append((float(al.x), float(al.y), float(al.z)))
+
+        self._route_pts = self._compute_polyline_tangents(prefix_xyz + blended_xyz)
+        self._route_waypoints = list(self._route_waypoints[:start_idx]) + adj_chain
+        self._lane_change_end_idx = start_idx + n_blend
         self._fsd_lane_changed = True
         self._fsd_metrics["lane_changes_completed"] += 1
         return True
+
+    def _sample_continuous_route_pose(
+        self,
+        x: float,
+        y: float,
+        start_idx: int,
+        lookahead_m: float = 8.0,
+    ) -> Tuple[int, float, float, float, float, float, float]:
+        """Project (x, y) onto `self._route_pts` and interpolate a continuous lookahead point.
+
+        Returns `(best_idx, proj_x, proj_y, proj_yaw, look_x, look_y, ref_yaw)`.
+        """
+        pts = getattr(self, "_route_pts", [])
+        if not pts:
+            return 0, x, y, 0.0, x + lookahead_m, y, 0.0
+        n = len(pts)
+        best_i = min(max(0, start_idx), n - 1)
+        best_d = 1e9
+        end_i = min(n, best_i + 12)
+        for idx in range(best_i, end_i):
+            d = math.hypot(x - pts[idx][0], y - pts[idx][1])
+            if d < best_d:
+                best_d = d
+                best_i = idx
+
+        # Continuous projection onto segment [best_i -> best_i + 1]
+        if best_i + 1 < n:
+            x0, y0, _, yaw0 = pts[best_i]
+            x1, y1, _, _ = pts[best_i + 1]
+            vx, vy = x1 - x0, y1 - y0
+            seg_len_sq = vx * vx + vy * vy
+            t_seg = (
+                float(np.clip(((x - x0) * vx + (y - y0) * vy) / seg_len_sq, 0.0, 1.0))
+                if seg_len_sq > 1e-4
+                else 0.0
+            )
+            proj_x = x0 + t_seg * vx
+            proj_y = y0 + t_seg * vy
+            proj_yaw = yaw0
+        else:
+            proj_x, proj_y, _, proj_yaw = pts[best_i]
+            t_seg = 0.0
+
+        # Walk continuously along polyline from (proj_x, proj_y) by `lookahead_m`
+        rem = lookahead_m
+        cx, cy = proj_x, proj_y
+        curr_idx = best_i
+        look_x, look_y = pts[-1][0], pts[-1][1]
+        while curr_idx + 1 < n:
+            nx, ny, _, _ = pts[curr_idx + 1]
+            ds = math.hypot(nx - cx, ny - cy)
+            if ds >= rem and ds > 1e-4:
+                ratio = rem / ds
+                look_x = cx + ratio * (nx - cx)
+                look_y = cy + ratio * (ny - cy)
+                break
+            rem -= ds
+            cx, cy = nx, ny
+            curr_idx += 1
+            look_x, look_y = cx, cy
+
+        ref_yaw = math.atan2(look_y - proj_y, look_x - proj_x)
+        return best_i, proj_x, proj_y, proj_yaw, look_x, look_y, ref_yaw
+
+    def _step_fsd4_lead_vehicle(self) -> None:
+        """Actively drive the FSD-4 ACC lead vehicle smoothly along the route at 24.0 km/h."""
+        if (
+            self._fsd_scenario_name != "FSD-4_Urban_ACC_Follow"
+            or self._scenario_actor is None
+            or self._carla_mod is None
+        ):
+            return
+        try:
+            carla = self._carla_mod
+            lead = self._scenario_actor
+            if lead.is_at_traffic_light():
+                tl = lead.get_traffic_light()
+                if tl is not None:
+                    try:
+                        tl.set_state(carla.TrafficLightState.Green)
+                    except Exception:
+                        pass
+            a_tr = lead.get_transform()
+            a_loc = a_tr.location
+            a_vel = lead.get_velocity()
+            lead_speed_kmh = float(3.6 * math.hypot(a_vel.x, a_vel.y))
+            lead_idx = int(getattr(self, "_lead_route_idx", 8))
+            new_idx, _, _, _, lx, ly, _ = self._sample_continuous_route_pose(
+                float(a_loc.x), float(a_loc.y), lead_idx, lookahead_m=7.5
+            )
+            self._lead_route_idx = new_idx
+            a_yaw = math.radians(float(a_tr.rotation.yaw))
+            target_yaw = math.atan2(ly - float(a_loc.y), lx - float(a_loc.x))
+            yaw_err = math.atan2(
+                math.sin(target_yaw - a_yaw), math.cos(target_yaw - a_yaw)
+            )
+            lead_steer = float(np.clip(yaw_err * 0.90, -0.45, 0.45))
+
+            target_lead_kmh = 24.0
+            speed_err = target_lead_kmh - lead_speed_kmh
+            if speed_err >= -0.8:
+                lead_throttle = float(np.clip(0.44 + 0.05 * speed_err, 0.18, 0.68))
+                lead_brake = 0.0
+            else:
+                lead_throttle = 0.0
+                lead_brake = float(np.clip(-0.08 * speed_err, 0.0, 0.35))
+            lead.apply_control(
+                carla.VehicleControl(
+                    throttle=round(lead_throttle, 4),
+                    steer=round(lead_steer, 4),
+                    brake=round(lead_brake, 4),
+                )
+            )
+        except Exception:
+            pass
 
     def _spawn_real_carla_episode(self, seed: int) -> None:
         """Spawn ego vehicle, FSD scenario actors, HD chase cam, and A* route in CARLA."""
@@ -372,6 +561,10 @@ class CarlaWrapper:
         self._fsd_stop_hold_steps = 0
         self._fsd_lane_changed = False
         self._lane_change_ramp_m = 0.0
+        self._lane_change_end_idx = 0
+        self._lead_route_idx = 8
+        self._spectator_cam_state = None
+        self._carla_steer_prev = 0.0
 
         scenario_idx = int(abs(seed - 5000)) % len(FSD_SCENARIO_NAMES)
         self._fsd_scenario_name = FSD_SCENARIO_NAMES[scenario_idx]
@@ -466,6 +659,7 @@ class CarlaWrapper:
             if self._ego_vehicle is not None:
                 self._route_waypoints = wp_chain
                 self._route_wp_idx = 0
+                self._rebuild_route_pts()
                 self._route_length_m = min(self.target_route_distance_m, 68.0)
                 break
 
@@ -477,9 +671,9 @@ class CarlaWrapper:
         if (
             self._fsd_scenario_name
             in ("FSD-2_Dynamic_Overtake_Left", "FSD-5_MultiBlock_Overtake_Right")
-            and len(self._route_waypoints) > 18
+            and len(self._route_waypoints) > 20
         ):
-            obs_wp = self._route_waypoints[16]  # ~32m ahead in ego's initial lane
+            obs_wp = self._route_waypoints[18]  # ~36m ahead in ego's initial lane
             obs_tf = carla.Transform(
                 carla.Location(
                     x=obs_wp.transform.location.x,
@@ -514,7 +708,7 @@ class CarlaWrapper:
             self._fsd_scenario_name == "FSD-4_Urban_ACC_Follow"
             and len(self._route_waypoints) > 14
         ):
-            lead_wp = self._route_waypoints[11]  # ~22m ahead in same lane
+            lead_wp = self._route_waypoints[8]  # ~16m ahead in same lane for steady ACC tracking
             lead_tf = carla.Transform(
                 carla.Location(
                     x=lead_wp.transform.location.x,
@@ -525,7 +719,7 @@ class CarlaWrapper:
             )
             self._scenario_actor = self._world.try_spawn_actor(vehicle_bps[1 % len(vehicle_bps)], lead_tf)
             if self._scenario_actor is not None:
-                self._scenario_actor.set_autopilot(True, self.tm_port)
+                self._lead_route_idx = 8
                 self._fsd_metrics["acc_follow_episodes"] += 1
 
         # 1. Attach 392x196 Wide RGB Camera (for DINOv2 + Laya)
@@ -612,6 +806,7 @@ class CarlaWrapper:
             self._ego_vehicle.apply_control(
                 carla.VehicleControl(throttle=0.45, steer=0.0, brake=0.0)
             )
+            self._step_fsd4_lead_vehicle()
             self._world.tick()
         while self._image_queue.qsize() > 1:
             try:
@@ -635,8 +830,8 @@ class CarlaWrapper:
     ) -> Optional[np.ndarray]:
         """Draw 3D AR Trajectory Carpet in CarlaUE4 and project FSD AR + BEV Radar onto HD frame."""
         carla = self._carla_mod
-        wps = getattr(self, "_route_waypoints", [])
-        if self._world is not None and len(wps) > best_i + 2:
+        pts = getattr(self, "_route_pts", [])
+        if self._world is not None and len(pts) > best_i + 2:
             try:
                 is_stop = traffic_light == "red" or hazard_source == "pedestrian"
                 if is_stop:
@@ -645,13 +840,13 @@ class CarlaWrapper:
                     col = carla.Color(255, 185, 20)
                 else:
                     col = carla.Color(20, 235, 220)
-                end_idx = min(len(wps) - 1, best_i + 15)
+                end_idx = min(len(pts) - 1, best_i + 15)
                 for idx in range(best_i, end_idx):
-                    p1 = wps[idx].transform.location
-                    p2 = wps[idx + 1].transform.location
+                    p1 = pts[idx]
+                    p2 = pts[idx + 1]
                     self._world.debug.draw_line(
-                        carla.Location(p1.x, p1.y, p1.z + 0.18),
-                        carla.Location(p2.x, p2.y, p2.z + 0.18),
+                        carla.Location(p1[0], p1[1], p1[2] + 0.18),
+                        carla.Location(p2[0], p2[1], p2[2] + 0.18),
                         thickness=0.14,
                         color=col,
                         life_time=0.07,
@@ -696,7 +891,7 @@ class CarlaWrapper:
                 return (u, v_px)
             return None
 
-        # 1. Project 3D FSD Trajectory Carpet onto 960x540 HD image
+        # 1. Project 3D FSD Trajectory Carpet (including Quintic S-Curve) onto 960x540 HD image
         is_stop = traffic_light == "red" or hazard_source == "pedestrian"
         if is_stop:
             ribbon_col = (255, 55, 55)
@@ -710,14 +905,12 @@ class CarlaWrapper:
 
         left_pts: List[Tuple[int, int]] = []
         right_pts: List[Tuple[int, int]] = []
-        if len(wps) > best_i + 2:
-            for idx in range(best_i + 1, min(len(wps), best_i + 18)):
-                wp = wps[idx]
-                w_loc = wp.transform.location
-                w_yaw = math.radians(float(wp.transform.rotation.yaw))
+        if len(pts) > best_i + 2:
+            for idx in range(best_i + 1, min(len(pts), best_i + 18)):
+                wx, wy, wz, w_yaw = pts[idx]
                 rx_v, ry_v = -math.sin(w_yaw) * 1.15, math.cos(w_yaw) * 1.15
-                pl = _world_to_pixel(float(w_loc.x - rx_v), float(w_loc.y - ry_v), float(w_loc.z + 0.08))
-                pr = _world_to_pixel(float(w_loc.x + rx_v), float(w_loc.y + ry_v), float(w_loc.z + 0.08))
+                pl = _world_to_pixel(wx - rx_v, wy - ry_v, wz + 0.08)
+                pr = _world_to_pixel(wx + rx_v, wy + ry_v, wz + 0.08)
                 if pl is not None and pr is not None:
                     left_pts.append(pl)
                     right_pts.append(pr)
@@ -734,6 +927,8 @@ class CarlaWrapper:
         if self._scenario_actor is not None:
             try:
                 a_loc = self._scenario_actor.get_location()
+                a_vel = self._scenario_actor.get_velocity()
+                a_kmh = 3.6 * math.hypot(a_vel.x, a_vel.y)
                 d_act = math.hypot(float(a_loc.x - ego_loc.x), float(a_loc.y - ego_loc.y))
                 p_bot = _world_to_pixel(float(a_loc.x), float(a_loc.y), float(a_loc.z))
                 p_top = _world_to_pixel(float(a_loc.x), float(a_loc.y), float(a_loc.z + 1.8))
@@ -750,7 +945,7 @@ class CarlaWrapper:
                         else (
                             f"STALLED CAR {d_act:.1f}m [{exp_man.upper()}]"
                             if "Overtake" in self._fsd_scenario_name
-                            else f"LEAD VEHICLE {d_act:.1f}m [ACC]"
+                            else f"LEAD {d_act:.1f}m | {a_kmh:.0f}km/h [ACC]"
                         )
                     )
                     cv2.rectangle(hd, (x1, max(0, y1 - 24)), (x1 + len(tag) * 9 + 10, y1), b_col, -1)
@@ -772,11 +967,11 @@ class CarlaWrapper:
         cv2.rectangle(hd, (12, 12), (12 + bev_w, 12 + bev_h), (18, 22, 28), -1)
         cv2.rectangle(hd, (12, 12), (12 + bev_w, 12 + bev_h), (80, 185, 255), 1)
         ego_bx, ego_by = 12 + bev_w // 2, 12 + bev_h - 32
-        # Draw BEV route waypoints
-        for idx in range(best_i, min(len(wps), best_i + 18)):
-            wl = wps[idx].transform.location
-            dx = float(wl.x - ego_loc.x)
-            dy = float(wl.y - ego_loc.y)
+        # Draw BEV route waypoints (with Quintic S-curve)
+        for idx in range(best_i, min(len(pts), best_i + 18)):
+            wx, wy, _, _ = pts[idx]
+            dx = float(wx - ego_loc.x)
+            dy = float(wy - ego_loc.y)
             fx = dx * cos_y + dy * sin_y
             fy = -dx * sin_y + dy * cos_y
             px = int(ego_bx + fy * 4.2)
@@ -841,50 +1036,42 @@ class CarlaWrapper:
             self._progress += math.hypot(dx, dy)
         self._prev_location = (float(loc.x), float(loc.y), float(loc.z))
 
-        wp_curr = self._map.get_waypoint(
-            loc, project_to_road=True, lane_type=carla.LaneType.Driving
-        )
-        wp_look = wp_curr
-        if getattr(self, "_route_waypoints", None):
-            # Advance along precomputed continuous route chain to avoid junction lane-jumping
-            best_i = self._route_wp_idx
-            best_d = 1e9
-            end_i = min(len(self._route_waypoints), self._route_wp_idx + 12)
-            for idx in range(self._route_wp_idx, end_i):
-                w_loc = self._route_waypoints[idx].transform.location
-                d = math.hypot(float(loc.x - w_loc.x), float(loc.y - w_loc.y))
-                if d < best_d:
-                    best_d = d
-                    best_i = idx
-            self._route_wp_idx = best_i
-            wp_curr = self._route_waypoints[best_i]
-            look_i = min(len(self._route_waypoints) - 1, best_i + 3)
-            wp_look = self._route_waypoints[look_i]
-
         ego_tr = v.get_transform()
         ego_yaw = math.radians(float(ego_tr.rotation.yaw))
-        curr_tr = wp_curr.transform
-        curr_yaw = math.radians(float(curr_tr.rotation.yaw))
-        look_tr = wp_look.transform
-        look_yaw = math.radians(float(look_tr.rotation.yaw))
 
-        # Signed lateral offset in CARLA left-handed frame (+ = left of lane center, - = right)
-        dx_wp = float(loc.x - curr_tr.location.x)
-        dy_wp = float(loc.y - curr_tr.location.y)
-        right_vec_x = -math.sin(curr_yaw)
-        right_vec_y = math.cos(curr_yaw)
+        # Continuous projection & lookahead along `self._route_pts` (eliminates 2.0m staircase jumps)
+        lookahead_m = float(np.clip(7.5 + 0.18 * speed_kmh, 7.5, 13.5))
+        best_i, proj_x, proj_y, proj_yaw, _, _, ref_yaw = (
+            self._sample_continuous_route_pose(
+                float(loc.x),
+                float(loc.y),
+                self._route_wp_idx,
+                lookahead_m=lookahead_m,
+            )
+        )
+        self._route_wp_idx = best_i
+        if getattr(self, "_route_waypoints", None):
+            wp_curr = self._route_waypoints[
+                min(best_i, len(self._route_waypoints) - 1)
+            ]
+        else:
+            wp_curr = self._map.get_waypoint(
+                loc, project_to_road=True, lane_type=carla.LaneType.Driving
+            )
+
+        # Signed lateral offset from continuous projected point (+ = left of path, - = right)
+        dx_wp = float(loc.x) - proj_x
+        dy_wp = float(loc.y) - proj_y
+        right_vec_x = -math.sin(proj_yaw)
+        right_vec_y = math.cos(proj_yaw)
         lat_right = dx_wp * right_vec_x + dy_wp * right_vec_y
         lane_offset_m = float(
             np.clip(-lat_right, -self.lane_width * 0.85, self.lane_width * 0.85)
         )
 
-        # Heading error toward lookahead waypoint (+ = pointing left of lane tangent, matching +steering = steer left)
-        target_yaw = math.atan2(
-            float(look_tr.location.y - loc.y),
-            float(look_tr.location.x - loc.x),
-        )
+        # Pure heading error relative to smooth path chord `ref_yaw` (+ = nose pointing left of path)
         heading_error = float(
-            -math.atan2(math.sin(ego_yaw - target_yaw), math.cos(ego_yaw - target_yaw))
+            -math.atan2(math.sin(ego_yaw - ref_yaw), math.cos(ego_yaw - ref_yaw))
         )
 
         next_wps = wp_curr.next(10.0)
@@ -892,7 +1079,7 @@ class CarlaWrapper:
         if next_wps:
             next_yaw = math.radians(float(next_wps[0].transform.rotation.yaw))
             road_curvature = float(
-                -math.atan2(math.sin(next_yaw - curr_yaw), math.cos(next_yaw - curr_yaw))
+                -math.atan2(math.sin(next_yaw - proj_yaw), math.cos(next_yaw - proj_yaw))
             )
 
         left_wp = wp_curr.get_left_lane()
@@ -913,9 +1100,20 @@ class CarlaWrapper:
         lead_speed_kmh = max(40.0, speed_kmh)
         hazard_source = "none"
         hx, hy = math.cos(ego_yaw), math.sin(ego_yaw)
+        is_overtake_scenario = self._fsd_scenario_name in (
+            "FSD-2_Dynamic_Overtake_Left",
+            "FSD-5_MultiBlock_Overtake_Right",
+        )
 
         for actor in self._world.get_actors():
             if actor.id == v.id:
+                continue
+            if (
+                is_overtake_scenario
+                and self._scenario_actor is not None
+                and actor.id == self._scenario_actor.id
+            ):
+                # Handled smoothly by the Quintic S-Curve overtake state machine below
                 continue
             type_id = str(getattr(actor, "type_id", ""))
             if not (type_id.startswith("vehicle.") or type_id.startswith("walker.pedestrian.")):
@@ -938,6 +1136,22 @@ class CarlaWrapper:
                     "pedestrian" if type_id.startswith("walker.pedestrian.") else "vehicle"
                 )
 
+        # Continuous ACC radar lock onto FSD-4 lead vehicle (never drops out on gentle curves)
+        if (
+            self._fsd_scenario_name == "FSD-4_Urban_ACC_Follow"
+            and self._scenario_actor is not None
+        ):
+            try:
+                a_loc = self._scenario_actor.get_location()
+                a_vel = self._scenario_actor.get_velocity()
+                d_lead = math.hypot(float(a_loc.x - loc.x), float(a_loc.y - loc.y))
+                v_lead_kmh = float(3.6 * math.hypot(a_vel.x, a_vel.y))
+                lead_distance_m = min(lead_distance_m, d_lead)
+                lead_speed_kmh = max(16.0, v_lead_kmh)
+                hazard_source = "vehicle"
+            except Exception:
+                pass
+
         # Traffic light state check
         traffic_light = "green"
         if v.is_at_traffic_light():
@@ -945,7 +1159,10 @@ class CarlaWrapper:
             if tl is not None:
                 tl_state = tl.get_state()
                 if tl_state == carla.TrafficLightState.Red:
-                    if self._fsd_stop_hold_steps >= 10:
+                    if (
+                        self._fsd_scenario_name == "FSD-4_Urban_ACC_Follow"
+                        or self._fsd_stop_hold_steps >= 10
+                    ):
                         try:
                             tl.set_state(carla.TrafficLightState.Green)
                         except Exception:
@@ -963,7 +1180,7 @@ class CarlaWrapper:
         nav_command = "go_straight"
         if abs(road_curvature) > 0.22:
             nav_command = "turn_left" if road_curvature > 0 else "turn_right"
-        exp_man = "follow_lead" if lead_distance_m <= 30.0 else "keep_lane"
+        exp_man = "follow_lead" if lead_distance_m <= 32.0 else "keep_lane"
 
         # Execute FSD Scenario-Specific State Machine (FSD-1 through FSD-5)
         if self._fsd_scenario_name == "FSD-1_Intersection_Turn" and not self._fsd_event_resolved:
@@ -987,14 +1204,14 @@ class CarlaWrapper:
         ):
             obs_loc = self._scenario_actor.get_location()
             d_obs = math.hypot(float(obs_loc.x - loc.x), float(obs_loc.y - loc.y))
-            if d_obs <= 30.0:
+            if d_obs <= 34.0:
                 exp_man = "change_left"
                 nav_command = "turn_left"
-                lead_distance_m = 22.0
-                lead_speed_kmh = 25.0
+                lead_distance_m = 26.0
+                lead_speed_kmh = 26.0
                 if not self._fsd_lane_changed:
                     self._switch_route_to_adjacent_lane("left")
-                if d_obs <= 16.0 or abs(lat_right) > 1.0:
+                if self._fsd_lane_changed and self._route_wp_idx >= self._lane_change_end_idx:
                     self._fsd_event_resolved = True
         elif (
             self._fsd_scenario_name == "FSD-5_MultiBlock_Overtake_Right"
@@ -1003,14 +1220,14 @@ class CarlaWrapper:
         ):
             obs_loc = self._scenario_actor.get_location()
             d_obs = math.hypot(float(obs_loc.x - loc.x), float(obs_loc.y - loc.y))
-            if d_obs <= 30.0:
+            if d_obs <= 34.0:
                 exp_man = "change_right"
                 nav_command = "turn_right"
-                lead_distance_m = 22.0
-                lead_speed_kmh = 25.0
+                lead_distance_m = 26.0
+                lead_speed_kmh = 26.0
                 if not self._fsd_lane_changed:
                     self._switch_route_to_adjacent_lane("right")
-                if d_obs <= 16.0 or abs(lat_right) > 1.0:
+                if self._fsd_lane_changed and self._route_wp_idx >= self._lane_change_end_idx:
                     self._fsd_event_resolved = True
         elif (
             self._fsd_scenario_name == "FSD-3_Pedestrian_Crosswalk_AEB"
@@ -1153,7 +1370,11 @@ class CarlaWrapper:
 
         if not self.use_mock and self._world is not None and self._ego_vehicle is not None:
             carla = self._carla_mod
-            ctrl_dict = self.to_carla_vehicle_control(steering, throttle_brake)
+            prev_st = float(getattr(self, "_carla_steer_prev", 0.0))
+            st_delta = float(np.clip(steering - prev_st, -0.055, 0.055))
+            smooth_steering = float(np.clip(prev_st + st_delta, -1.0, 1.0))
+            self._carla_steer_prev = smooth_steering
+            ctrl_dict = self.to_carla_vehicle_control(smooth_steering, throttle_brake)
             ctrl = carla.VehicleControl(
                 steer=ctrl_dict["steer"],
                 throttle=ctrl_dict["throttle"],
@@ -1162,6 +1383,7 @@ class CarlaWrapper:
                 reverse=ctrl_dict["reverse"],
             )
             self._ego_vehicle.apply_control(ctrl)
+            self._step_fsd4_lead_vehicle()
             self._world.tick()
             self._update_spectator_chase_cam()
             rgb, telemetry, info = self._extract_real_carla_state()

@@ -186,18 +186,31 @@ class SafetyShieldPID:
             # Smoothly harmonize with MetaDrive traffic flow (30 km/h) as lead vehicle approaches
             smooth_cap = 30.0 + max(0.0, lead_distance_m - 30.0) * 1.4
             target_speed_kmh = min(target_speed_kmh, smooth_cap)
-        if lead_distance_m < 32.0 and gated_speed_level > 0:
+        if lead_distance_m < 38.0 and gated_speed_level > 0:
             lead_speed_kmh = float(telemetry.get("lead_speed_kmh", target_speed_kmh))
-            v_ego = current_speed_kmh / 3.6
-            v_lead = lead_speed_kmh / 3.6
-            dv = max(0.0, v_ego - v_lead)
-            d_star = 10.0 + v_ego * 1.5 + (v_ego * dv) / (2.0 * 2.236)
-            if lead_distance_m < d_star * 1.15:
-                safe_follow_speed = max(
-                    0.0,
-                    min(lead_speed_kmh, (lead_distance_m - 7.5) * 1.8),
+            if lead_speed_kmh >= 8.0 and not self.use_mock:
+                # Smooth Constant-Time-Headway ACC speed synchronization (locks onto 16.0m headway at v_lead)
+                desired_gap_m = 16.0
+                gap_error_m = lead_distance_m - desired_gap_m
+                acc_sync_speed = float(
+                    np.clip(
+                        lead_speed_kmh + 0.85 * gap_error_m,
+                        0.0,
+                        max(target_speed_kmh, min(35.0, lead_speed_kmh + 6.0)),
+                    )
                 )
-                target_speed_kmh = min(target_speed_kmh, safe_follow_speed)
+                target_speed_kmh = acc_sync_speed
+            else:
+                v_ego = current_speed_kmh / 3.6
+                v_lead = lead_speed_kmh / 3.6
+                dv = max(0.0, v_ego - v_lead)
+                d_star = 10.0 + v_ego * 1.5 + (v_ego * dv) / (2.0 * 2.236)
+                if lead_distance_m < d_star * 1.15:
+                    safe_follow_speed = max(
+                        0.0,
+                        min(lead_speed_kmh, (lead_distance_m - 7.5) * 1.8),
+                    )
+                    target_speed_kmh = min(target_speed_kmh, safe_follow_speed)
 
         return {
             "raw_maneuver": raw_maneuver,
@@ -232,10 +245,11 @@ class SafetyShieldPID:
             target_offset_m = -self.lane_width * 0.85
         elif (
             not self.use_mock
+            and abs(float(telemetry.get("road_curvature", 0.0))) > 0.25
             and not bool(telemetry.get("left_lane_available", True))
             and bool(telemetry.get("right_lane_available", False))
         ):
-            # Keep a 0.18m safety margin away from the left continuous yellow line in lane 0
+            # Keep a 0.18m safety margin away from the left continuous yellow line in lane 0 on tight curves
             target_offset_m = -0.18
         else:
             target_offset_m = 0.0
