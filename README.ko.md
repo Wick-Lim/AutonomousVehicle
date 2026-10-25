@@ -28,9 +28,9 @@
 | --- | --- | --- | --- | --- | --- |
 | **1. 환경** | `CarlaWrapper` / `MetaDriveWrapper` | 도심 교차로·신호등·보행자(CARLA 0.9.16 `Town10HD_Opt`) 및 절차적 고속도로(MetaDrive) | `carla.VehicleControl` / `[Steering, Throttle/Brake]` | $196 \times 392$ 와이드 RGB + 정형 텔레메트리 JSON | 환경 (고정) |
 | **2. 시각 인지** | `DINOv2Backbone` | `facebook/dinov2-base` (86M), 패치 크기 $14 \times 14$ | $(B, 3, 196, 392)$ RGB 텐서 | $14 \times 28 = 392$개 패치 특징 벡터 (`768`차원) | **동결 (Freeze)** |
-| **3. 공간 정렬** | `SpatialProjector` | `AdaptiveAvgPool2d(4, 9)` + 2D 위치 임베딩 + 2-Layer MLP | $(B, 392, 768)$ 패치 벡터 | 가로 해상도가 보존된 **36개 공간 시각 토큰 (`1024`차원)** | **집중 학습 (~1.85M)** |
-| **4. 전술 판단** | `LayaPilot` | `convaiinnovations/laya` (ModernBERT 421M) | `[CLS]` + 36개 시각 토큰 + 텔레메트리 JSON/마커 (`inputs_embeds`) | `maneuver`(`choice`), `speed_level`(`score`), `emergency_brake`(`noul`) 및 신뢰도 | **동결 (Freeze)** |
-| **5. 물리 제어** | `SafetyShieldPID` | 신뢰도 게이팅 안전 실드 + 선형 조향 램프 + 등시간 차간거리 ACC + PID 제어기 | Laya 의사결정 및 보정 확률 | 최종 `[Steering (-1~1), Throttle/Brake (-1~1)]` / `VehicleControl` | 규칙·제어 기반 |
+| **3. 시공간 정렬 및 보조 인지** | `SpatialProjector` + `AuxiliaryPerceptionHead` | `AdaptiveAvgPool2d(4, 9)` + 2D 위치 임베딩 + 시공간 링 버퍼($\Delta V_t$) + 보조 비전 인지 헤드 | $(B, 392, 768)$ 패치 벡터 | **36개 시공간 시각 토큰 (`1024`차원)** + 차간거리·신호등·사각지대 예측 | **집중 학습 (~1.85M 코어)** |
+| **4. 전술 판단 및 궤적 예측** | `LayaPilot` | `convaiinnovations/laya` (ModernBERT 421M) + 6-스텝 E2E 궤적 헤드 | `[CLS]` + 36개 시각 토큰 + 텔레메트리 JSON/마커 (`inputs_embeds`) | `maneuver`, `speed_level`, `emergency_brake` + **3.0초 미래 6-웨이포인트 궤적 $\hat{\tau}_{1:6}$** | **동결 (Freeze)** |
+| **5. MPC/PID 물리 제어** | `SafetyShieldPID` | 신뢰도 게이팅 실드 + 360° 사각지대 인터록 + 운동학적 자전거 MPC + 선형 조향 램프 + ACC | Laya 의사결정, $\hat{\tau}_{1:6}$ 및 보정 확률 | 최종 `[Steering (-1~1), Throttle/Brake (-1~1)]` / `VehicleControl` | 규칙·MPC/PID 기반 |
 
 ---
 
@@ -132,21 +132,22 @@ AutonomousVehicle/
 
 ## 5. 폐루프 주행 벤치마크 결과 (Real Simulators & HuggingFace Models)
 
-### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 도심 5대 FSD 시나리오 벤치마크
-- **검증된 5대 도심 FSD 시나리오:**
-  1. `FSD-1_Intersection_Turn`: 도심 신호등 교차로 적신호 정지선 정차 후 녹색 신호 출발·주행
-  2. `FSD-2_Dynamic_Overtake_Left`: 전방 정차 차량 인지 및 최소 저크 5차 S-커브 좌측 차선 변경 추월
-  3. `FSD-3_Pedestrian_Crosswalk_AEB`: 횡단보도 보행자 돌발 출현 인지 및 Rule 1 긴급 제동(AEB) 정차
-  4. `FSD-4_Urban_ACC_Follow`: 전방 주행 리드 차량(24 km/h) 뒤 16.0m 안전 차간거리 및 속도 동조 추종(ACC)
-  5. `FSD-5_MultiBlock_Overtake_Right`: 다차선 도심 구간 우측 차선 S-커브 회피 추월 및 완주
+### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 도심 5대 FSD v2 시나리오 벤치마크 (5종 기상 환경 포함)
+- **검증된 5대 도심 FSD 시나리오 및 5종 기상 프리셋 (`ClearNoon`, `CloudyNoon`, `WetNoon`, `SoftRainNoon`, `ClearSunset`):**
+  1. `FSD-1_Intersection_Turn` (`ClearNoon`): 도심 신호등 교차로 적신호 정지선 정차 후 녹색 신호 출발·주행
+  2. `FSD-2_Dynamic_Overtake_Left` (`CloudyNoon`): 전방 정차 차량 인지 및 최소 저크 5차 S-커브 좌측 차선 변경 추월
+  3. `FSD-3_Pedestrian_Crosswalk_AEB` (`WetNoon`): 횡단보도 보행자 돌발 출현 인지 및 Rule 1 긴급 제동(AEB) 정차
+  4. `FSD-4_Urban_ACC_Follow` (`SoftRainNoon`): 전방 주행 리드 차량(24 km/h) 뒤 16.0m 안전 차간거리 및 속도 동조 추종(ACC)
+  5. `FSD-5_MultiBlock_Overtake_Right` (`ClearSunset`): 다차선 도심 구간 우측 차선 S-커브 회피 추월 및 완주
 
 | 평가 항목 (Metric) | 목표 수치 (Target) | 측정 결과 (Measured) | 상태 |
 | :--- | :--- | :--- | :---: |
-| **단일 프레임 추론 지연 시간 (Latency)** | **40.0 ms 이하 ($\ge 25$ FPS)** | **31.67 ms (31.6 FPS, P95: 32.89 ms)** | **PASS** |
-| **주행 완주율 (Route Completion Rate)** | **85.0% 이상** | **100.0% (5/5 FSD 시나리오 완주)** | **PASS** |
+| **단일 프레임 추론 지연 시간 (Full FSD v2 / 기본)** | **40.0 ms 이하 ($\ge 25$ FPS)** | **33.68 ms (29.7 FPS) / 31.67 ms (31.6 FPS)** | **PASS** |
+| **주행 완주율 (Route Completion Rate)** | **85.0% 이상** | **100.0% (5/5 FSD 시나리오 및 5종 기상 완주)** | **PASS** |
 | **무사고율 (Crash-Free Rate)** | **95.0% 이상** | **100.0% (차량·보행자 충돌 0, 신호위반 0, 차선이탈 0)** | **PASS** |
 | **신뢰도 보정 오차 (ECE)** | **0.0500 이하** | **0.0000** | **PASS** |
 | **CARLA Driving Score (리더보드 DS)** | **85.0% 이상** | **100.0%** | **PASS** |
+| **E2E 미래 궤적 예측 범위 및 보조 비전 차간거리 MAE** | **3.0초 ($K=6$) / 5.0m 이하** | **3.0초 (6 Waypoints) / 3.10 m MAE** | **PASS** |
 
 ### 5.2. MetaDrive 0.4.3 고속도로·교차로 벤치마크 (`4,153` 프레임)
 

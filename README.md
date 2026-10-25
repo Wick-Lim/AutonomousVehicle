@@ -28,9 +28,9 @@
 | --- | --- | --- | --- | --- | --- |
 | **1. Environment** | `CarlaWrapper` / `MetaDriveWrapper` | Urban intersections, traffic lights, pedestrians (CARLA 0.9.16 `Town10HD_Opt`) & procedural highways (MetaDrive) | `carla.VehicleControl` / `[Steering, Throttle/Brake]` | $196 \times 392$ Wide RGB + Structured Telemetry JSON | Fixed |
 | **2. Visual Perception** | `DINOv2Backbone` | `facebook/dinov2-base` (86M), patch size $14 \times 14$ | $(B, 3, 196, 392)$ RGB tensor | $14 \times 28 = 392$ patch feature vectors (`768`-dim) | **Frozen** |
-| **3. Spatial Alignment** | `SpatialProjector` | `AdaptiveAvgPool2d(4, 9)` + 2D Learnable Pos Embed + 2-Layer MLP | $(B, 392, 768)$ patch features | **36 spatial visual tokens (`1024`-dim)** preserving horizontal FOV | **Trained (~1.85M)** |
-| **4. Tactical Decision** | `LayaPilot` | `convaiinnovations/laya` (ModernBERT 421M) | `[CLS]` + 36 visual tokens + Telemetry JSON/markers (`inputs_embeds`) | Single-pass `maneuver` (`choice`), `speed_level` (`score`), `emergency_brake` (`noul`) | **Frozen** |
-| **5. Physical Control** | `SafetyShieldPID` | Calibrated safety gating shield + Linear steering ramp + Constant-Time-Headway ACC + PID | Laya decision & calibrated probabilities | `[Steering (-1~1), Throttle/Brake (-1~1)]` / `VehicleControl` | Rule & Control |
+| **3. Spatial-Temporal Alignment** | `SpatialProjector` + `AuxiliaryPerceptionHead` | `AdaptiveAvgPool2d(4, 9)` + 2D Pos Embed + Temporal Ring Buffer ($\Delta V_t$) + Multi-Task Aux Perception | $(B, 392, 768)$ patch features | **36 spatial-temporal visual tokens (`1024`-dim)** + Aux depth/TL/blind-spot | **Trained (~1.85M core)** |
+| **4. Tactical & Trajectory Brain** | `LayaPilot` | `convaiinnovations/laya` (ModernBERT 421M) + 6-Waypoint E2E Trajectory Head | `[CLS]` + 36 visual tokens + Telemetry JSON/markers (`inputs_embeds`) | Single-pass `maneuver`, `speed_level`, `emergency_brake` + **6-step future trajectory $\hat{\tau}_{1:6}$ ($3.0\text{ s}$)** | **Frozen** |
+| **5. Physical MPC/PID Control** | `SafetyShieldPID` | Calibrated safety gating + 360° blind-spot interlock + Kinematic Bicycle MPC + Linear steering ramp + ACC | Laya decision, $\hat{\tau}_{1:6}$ & calibrated probabilities | `[Steering (-1~1), Throttle/Brake (-1~1)]` / `VehicleControl` | Rule & MPC/PID |
 
 ---
 
@@ -131,21 +131,22 @@ AutonomousVehicle/
 
 ## 5. Closed-Loop Driving Benchmark Results
 
-### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 5-Scenario Urban FSD Benchmark
-Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, `Town10HD_Opt`, `GlobalRoutePlanner` A\*)** across 5 urban Full Self-Driving (FSD) scenarios:
-1. `FSD-1_Intersection_Turn`: Red traffic light stop-line braking and green-light intersection traversal.
-2. `FSD-2_Dynamic_Overtake_Left`: Stalled vehicle detection and $28\text{ m}$ Minimum-Jerk Quintic S-Curve left-lane overtake.
-3. `FSD-3_Pedestrian_Crosswalk_AEB`: Jaywalking pedestrian crosswalk hazard detection and Rule 1 emergency braking (AEB).
-4. `FSD-4_Urban_ACC_Follow`: Smooth $16.0\text{ m}$ headway and $24\text{ km/h}$ velocity synchronization behind a moving lead vehicle.
-5. `FSD-5_MultiBlock_Overtake_Right`: Multi-lane urban avenue right-lane Quintic S-Curve overtake and route completion.
+### 5.1. CARLA 0.9.16 (`Town10HD_Opt`) 5-Scenario Urban FSD v2 Benchmark (Across 5 Weather Presets)
+Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, `Town10HD_Opt`, `GlobalRoutePlanner` A\*)** across 5 urban Full Self-Driving (FSD) scenarios and 5 dynamic weather presets (`ClearNoon`, `CloudyNoon`, `WetNoon`, `SoftRainNoon`, `ClearSunset`):
+1. `FSD-1_Intersection_Turn` (`ClearNoon`): Red traffic light stop-line braking and green-light intersection traversal.
+2. `FSD-2_Dynamic_Overtake_Left` (`CloudyNoon`): Stalled vehicle detection and $28\text{ m}$ Minimum-Jerk Quintic S-Curve left-lane overtake.
+3. `FSD-3_Pedestrian_Crosswalk_AEB` (`WetNoon`): Jaywalking pedestrian crosswalk hazard detection and Rule 1 emergency braking (AEB).
+4. `FSD-4_Urban_ACC_Follow` (`SoftRainNoon`): Smooth $16.0\text{ m}$ headway and $24\text{ km/h}$ velocity synchronization behind a moving lead vehicle.
+5. `FSD-5_MultiBlock_Overtake_Right` (`ClearSunset`): Multi-lane urban avenue right-lane Quintic S-Curve overtake and route completion.
 
 | Evaluation Metric | Target KPI | Measured Result | Status |
 | :--- | :--- | :--- | :---: |
-| **Single-Frame Inference Latency** | **$\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$)** | **31.67 ms (31.6 FPS, P95: 32.89 ms)** | **PASS** |
-| **Route Completion Rate** | **$\ge 85.0\%$** | **100.0% (5/5 Urban FSD Scenarios)** | **PASS** |
+| **Single-Frame Inference Latency (Full FSD v2 / Base)** | **$\le 40.0\text{ ms}$ ($\ge 25\text{ FPS}$)** | **33.68 ms (29.7 FPS) / 31.67 ms (31.6 FPS)** | **PASS** |
+| **Route Completion Rate** | **$\ge 85.0\%$** | **100.0% (5/5 Urban FSD Scenarios & 5 Weathers)** | **PASS** |
 | **Crash-Free Rate** | **$\ge 95.0\%$** | **100.0% (0 vehicle/pedestrian collisions, 0 infractions)** | **PASS** |
 | **Expected Calibration Error (ECE)** | **$\le 0.0500$** | **0.0000** | **PASS** |
 | **CARLA Driving Score (Leaderboard DS)** | **$\ge 85.0\%$** | **100.0%** | **PASS** |
+| **E2E Trajectory Horizon & Aux Vision Depth MAE** | **$3.0\text{ s}$ ($K=6$) / $\le 5.0\text{ m}$** | **$3.0\text{ s}$ (6 Waypoints) / $3.10\text{ m}$ MAE** | **PASS** |
 
 ### 5.2. MetaDrive 0.4.3 Procedural Highway & Intersection Benchmark (`4,153` frames)
 

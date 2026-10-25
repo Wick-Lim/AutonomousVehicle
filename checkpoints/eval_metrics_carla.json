@@ -1,22 +1,32 @@
 {
   "simulator": "carla",
   "episodes": 5,
-  "total_frames": 889,
-  "mean_latency_ms": 31.67,
-  "p95_latency_ms": 32.79,
-  "fps": 31.6,
+  "total_frames": 888,
+  "mean_latency_ms": 33.68,
+  "p95_latency_ms": 35.45,
+  "fps": 29.7,
   "route_completion_rate_pct": 100.0,
   "mean_route_progress_pct": 100.0,
   "driving_score_pct": 100.0,
   "crash_free_rate_pct": 100.0,
   "ece": 0.0,
   "online_sim_ece": 0.0,
+  "e2e_trajectory_waypoints": 6,
+  "e2e_trajectory_horizon_s": 3.0,
+  "vision_aux_lead_mae_m": 3.1,
   "fsd_scenarios_tested": [
     "FSD-1_Intersection_Turn",
     "FSD-2_Dynamic_Overtake_Left",
     "FSD-3_Pedestrian_Crosswalk_AEB",
     "FSD-4_Urban_ACC_Follow",
     "FSD-5_MultiBlock_Overtake_Right"
+  ],
+  "weather_presets_tested": [
+    "ClearNoon",
+    "CloudyNoon",
+    "WetNoon",
+    "SoftRainNoon",
+    "ClearSunset"
   ],
   "fsd_metrics": {
     "red_light_stops": 1,
@@ -29,7 +39,7 @@
     "off_road_infractions": 0
   },
   "shield_interventions": {
-    "rule1_emergency_brake": 27,
+    "rule1_emergency_brake": 26,
     "boundary_left_unavailable": 76,
     "boundary_right_unavailable": 79
   },

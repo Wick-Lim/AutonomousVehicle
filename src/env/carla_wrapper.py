@@ -32,6 +32,14 @@ FSD_SCENARIO_NAMES: Tuple[str, ...] = (
     "FSD-5_MultiBlock_Overtake_Right",
 )
 
+FSD_WEATHER_PRESETS: Tuple[str, ...] = (
+    "ClearNoon",
+    "CloudyNoon",
+    "WetNoon",
+    "SoftRainNoon",
+    "ClearSunset",
+)
+
 
 class CarlaWrapper:
     """CARLA 3D Urban Autonomous Driving Wrapper with 196x392 RGB & Waypoint/Traffic-Light Telemetry."""
@@ -568,6 +576,13 @@ class CarlaWrapper:
 
         scenario_idx = int(abs(seed - 5000)) % len(FSD_SCENARIO_NAMES)
         self._fsd_scenario_name = FSD_SCENARIO_NAMES[scenario_idx]
+        self._weather_preset = FSD_WEATHER_PRESETS[scenario_idx % len(FSD_WEATHER_PRESETS)]
+        try:
+            weather_param = getattr(carla.WeatherParameters, self._weather_preset, None)
+            if weather_param is not None:
+                self._world.set_weather(weather_param)
+        except Exception:
+            pass
 
         bp_lib = self._world.get_blueprint_library()
         all_sps = list(self._map.get_spawn_points())
@@ -963,10 +978,10 @@ class CarlaWrapper:
                 pass
 
         # 3. Draw Top-Left Bird's-Eye-View (BEV) FSD Radar Mini-Map & Scenario Banner
-        bev_w, bev_h = 150, 185
+        bev_w, bev_h = 150, 195
         cv2.rectangle(hd, (12, 12), (12 + bev_w, 12 + bev_h), (18, 22, 28), -1)
         cv2.rectangle(hd, (12, 12), (12 + bev_w, 12 + bev_h), (80, 185, 255), 1)
-        ego_bx, ego_by = 12 + bev_w // 2, 12 + bev_h - 32
+        ego_bx, ego_by = 12 + bev_w // 2, 12 + bev_h - 38
         # Draw BEV route waypoints (with Quintic S-curve)
         for idx in range(best_i, min(len(pts), best_i + 18)):
             wx, wy, _, _ = pts[idx]
@@ -978,29 +993,48 @@ class CarlaWrapper:
             py = int(ego_by - fx * 3.6)
             if 16 <= px <= 10 + bev_w and 16 <= py <= 10 + bev_h:
                 cv2.circle(hd, (px, py), 3, ribbon_col, -1)
+        # Draw 360-deg Left/Right Blind-Spot Radar Zones next to Ego Car
+        bs_left = bool(getattr(self, "_blind_spot_left", False))
+        bs_right = bool(getattr(self, "_blind_spot_right", False))
+        bs_l_col = (50, 55, 255) if bs_left else (45, 95, 65)
+        bs_r_col = (50, 55, 255) if bs_right else (45, 95, 65)
+        cv2.rectangle(hd, (ego_bx - 24, ego_by - 10), (ego_bx - 11, ego_by + 14), bs_l_col, 1 if not bs_left else -1)
+        cv2.rectangle(hd, (ego_bx + 11, ego_by - 10), (ego_bx + 24, ego_by + 14), bs_r_col, 1 if not bs_right else -1)
         # Draw Ego Car on BEV
         cv2.rectangle(hd, (ego_bx - 7, ego_by - 12), (ego_bx + 7, ego_by + 12), (60, 255, 120), -1)
         cv2.putText(
             hd,
-            "FSD BEV RADAR",
-            (22, 30),
+            "FSD 360 BEV RADAR",
+            (18, 29),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
+            0.39,
             (180, 220, 255),
             1,
             cv2.LINE_AA,
         )
+        bs_status = f"BS-L:{'OCC' if bs_left else 'CLR'} BS-R:{'OCC' if bs_right else 'CLR'}"
+        cv2.putText(
+            hd,
+            bs_status,
+            (20, 12 + bev_h - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            (165, 230, 185) if not (bs_left or bs_right) else (80, 90, 255),
+            1,
+            cv2.LINE_AA,
+        )
 
-        # Scenario Title Banner at top-center
-        banner = f"SCENARIO: {self._fsd_scenario_name} | LIGHT: {traffic_light.upper()}"
-        cv2.rectangle(hd, (175, 12), (665, 44), (20, 25, 34), -1)
-        cv2.rectangle(hd, (175, 12), (665, 44), ribbon_col, 1)
+        # Scenario Title & Weather Banner at top-center
+        weather_name = str(getattr(self, "_weather_preset", "ClearNoon"))
+        banner = f"{self._fsd_scenario_name} | {weather_name} | TL:{traffic_light.upper()}"
+        cv2.rectangle(hd, (172, 12), (695, 44), (20, 25, 34), -1)
+        cv2.rectangle(hd, (172, 12), (695, 44), ribbon_col, 1)
         cv2.putText(
             hd,
             banner,
-            (186, 33),
+            (182, 33),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.52,
+            0.47,
             ribbon_col,
             2,
             cv2.LINE_AA,
@@ -1095,10 +1129,12 @@ class CarlaWrapper:
             and (right_wp.lane_id * wp_curr.lane_id > 0)
         )
 
-        # Scan forward vehicles and pedestrians
+        # Scan forward vehicles/pedestrians & 360-degree side/rear blind-spot zones
         lead_distance_m = 60.0
         lead_speed_kmh = max(40.0, speed_kmh)
         hazard_source = "none"
+        blind_spot_left = False
+        blind_spot_right = False
         hx, hy = math.cos(ego_yaw), math.sin(ego_yaw)
         is_overtake_scenario = self._fsd_scenario_name in (
             "FSD-2_Dynamic_Overtake_Left",
@@ -1125,7 +1161,13 @@ class CarlaWrapper:
             if dist > 55.0:
                 continue
             fp = rx * hx + ry * hy
-            lp = abs(-rx * hy + ry * hx)
+            lat_signed = -rx * hy + ry * hx  # + = right of ego, - = left of ego
+            lp = abs(lat_signed)
+            if -10.0 <= fp <= 7.5 and 1.8 <= lp <= 5.0 and not is_overtake_scenario:
+                if lat_signed < 0.0:
+                    blind_spot_left = True
+                else:
+                    blind_spot_right = True
             if 0.5 < fp < lead_distance_m and lp < 2.2:
                 lead_distance_m = float(fp)
                 a_vel = actor.get_velocity()
@@ -1135,6 +1177,8 @@ class CarlaWrapper:
                 hazard_source = (
                     "pedestrian" if type_id.startswith("walker.pedestrian.") else "vehicle"
                 )
+        self._blind_spot_left = blind_spot_left
+        self._blind_spot_right = blind_spot_right
 
         # Continuous ACC radar lock onto FSD-4 lead vehicle (never drops out on gentle curves)
         if (
@@ -1298,6 +1342,8 @@ class CarlaWrapper:
             expert_maneuver=exp_man,
             traffic_light=traffic_light,
             hazard_source=hazard_source,
+            blind_spot_left=blind_spot_left,
+            blind_spot_right=blind_spot_right,
         )
         route_comp = float(
             np.clip(self._progress / max(1.0, self._route_length_m), 0.0, 1.0)
@@ -1313,6 +1359,7 @@ class CarlaWrapper:
             "simulator": "carla",
             "scenario_event": "real_carla",
             "fsd_scenario": self._fsd_scenario_name,
+            "weather_preset": str(getattr(self, "_weather_preset", "ClearNoon")),
             "expert_maneuver": exp_man,
             "hd_rgb": hd_ar_frame,
             "lead_distance_m": round(lead_distance_m, 2),
@@ -1320,6 +1367,8 @@ class CarlaWrapper:
             "road_curvature": round(road_curvature, 4),
             "traffic_light": traffic_light,
             "hazard_source": hazard_source,
+            "blind_spot_left": blind_spot_left,
+            "blind_spot_right": blind_spot_right,
             "route_completion": route_comp,
             "driving_score": round(route_comp * infraction_penalty * 100.0, 2),
             "fsd_metrics": dict(self._fsd_metrics),

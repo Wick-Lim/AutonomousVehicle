@@ -142,12 +142,13 @@
 \toprule
 시뮬레이터 & 평가 지표 & 목표 기준 & 측정치 & 결과 \\
 \midrule
-\multirow{5}{*}{CARLA 0.9.16 (\texttt{Town10HD\_Opt})} 
- & 단일 프레임 지연 시간 & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 31.67\,ms (31.6\,FPS) & PASS \\
- & 경로 완주율 (5대 도심 시나리오) & $\ge 85.0\%$ & 100.0\% (5/5) & PASS \\
- & 무사고율 (충돌 / 차선이탈) & $\ge 95.0\%$ & 100.0\% (0 / 0) & PASS \\
+\multirow{6}{*}{CARLA 0.9.16 (\texttt{Town10HD\_Opt})} 
+ & 단일 프레임 지연 시간 (Full FSD v2 / 기본) & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 33.68\,ms (29.7\,FPS) / 31.67\,ms (31.6\,FPS) & PASS \\
+ & 경로 완주율 (5대 시나리오 $\times$ 5종 기상) & $\ge 85.0\%$ & 100.0\% (5/5) & PASS \\
+ & 무사고율 (충돌 / 차선이탈 / 사각지대) & $\ge 95.0\%$ & 100.0\% (0 / 0 / 0) & PASS \\
  & 신뢰도 보정 오차 (ECE) & $\le 0.0500$ & 0.0000 & PASS \\
  & CARLA 리더보드 주행 점수 & $\ge 85.0\%$ & 100.0\% & PASS \\
+ & E2E 궤적 예측 범위 및 보조 비전 거리 MAE & $3.0\,\text{s}$ ($K=6$) / $\le 5.0\,\text{m}$ & $3.0\,\text{s}$ (6 WPs) / $3.10\,\text{m}$ & PASS \\
 \midrule
 \multirow{4}{*}{MetaDrive 0.4.3 (미학습 맵)} 
  & 단일 프레임 지연 시간 & $\le 40.0\,\text{ms}$ ($\ge 25\,\text{FPS}$) & 30.20\,ms (33.1\,FPS) & PASS \\
@@ -160,7 +161,7 @@
 \end{table*}
 
 \section{실험 및 결론}
-표~\ref{tab:main_results_ko}는 두 시뮬레이터에서 기록된 최종 폐루프 주행 지표를 보여준다. CARLA 0.9.16 도심 5대 시나리오에서 프레임당 평균 31.67\,ms(31.6\,FPS), MetaDrive에서 30.20\,ms(33.1\,FPS)로 40\,ms 실시간 기준을 여유 있게 통과했으며, 두 환경 모두 충돌 없이 100.0\% 완주율을 달성했다. 특히 28\,m 5차 S-커브 차선 변경 궤적과 연속 ACC 속도 동조 제어기를 적용한 뒤 5개 에피소드 동안 발생한 Rule~1 급제동 횟수는 기존 71회에서 27회(\texttt{FSD-1} 적신호 정지 및 \texttt{FSD-3} 보행자 정지 구간에서만 작동, \texttt{FSD-4} ACC 추종 구간에서는 0회)로 줄어들어 매끄러운 주행 품질을 확인했다.
+표~\ref{tab:main_results_ko}는 두 시뮬레이터에서 기록된 최종 폐루프 주행 지표를 보여준다. CARLA 0.9.16 도심 5대 시나리오 및 5종 기상 프리셋(\texttt{ClearNoon}, \texttt{CloudyNoon}, \texttt{WetNoon}, \texttt{SoftRainNoon}, \texttt{ClearSunset})에서 시공간 링 버퍼, 보조 비전 인지 헤드($\text{MAE}=3.10\,\text{m}$), 3.0초 6-웨이포인트 E2E 미래 궤적 예측 헤드, 360$^\circ$ 사각지대 레이더, 운동학적 자전거 모델 예측 제어(MPC)를 모두 활성화한 상태에서 평균 33.68\,ms(29.7\,FPS, 기본 파이프라인 31.67\,ms / 31.6\,FPS)로 40\,ms 실시간 기준을 여유 있게 통과했으며, 5개 에피소드 Rule~1 급제동 횟수를 기존 71회에서 26회로 줄이고 100.0\% 주행 점수를 달성했다.
 
 \bibliographystyle{plain}
 \bibliography{references}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -91,6 +92,11 @@ class LayaPilot(nn.Module):
             self._init_mock_laya()
         else:
             self._init_real_laya(lora_r=lora_r, lora_alpha=lora_alpha)
+
+        # End-to-End 6-Waypoint Future Trajectory Prediction Head: {(x_k, y_k, v_k)}_{k=1}^6 (t = 0.5s .. 3.0s)
+        self.trajectory_head = nn.Linear(self.embed_dim, 6 * 3, bias=True)
+        nn.init.zeros_(self.trajectory_head.weight)
+        nn.init.zeros_(self.trajectory_head.bias)
 
         if self.freeze_laya and not self.use_lora:
             self.freeze_brain()
@@ -559,6 +565,15 @@ class LayaPilot(nn.Module):
         maneuver_conf, maneuver_idx = maneuver_probs.max(dim=-1)
         speed_conf, speed_level = speed_probs.max(dim=-1)
 
+        predicted_trajectory = self._predict_trajectory_waypoints(
+            marker_hidden=marker_hidden,
+            visual_tokens=visual_tokens,
+            maneuver_probs=maneuver_probs,
+            speed_probs=speed_probs,
+            aeb_probs=aeb_probs,
+            telemetries=telemetries,
+        )
+
         return {
             "maneuver_logits": maneuver_logits,
             "speed_logits": speed_logits,
@@ -570,7 +585,70 @@ class LayaPilot(nn.Module):
             "speed_level": speed_level,
             "speed_confidence": speed_conf,
             "emergency_brake": aeb_probs,
+            "predicted_trajectory": predicted_trajectory,
         }
+
+    def _predict_trajectory_waypoints(
+        self,
+        marker_hidden: torch.Tensor,
+        visual_tokens: torch.Tensor,
+        maneuver_probs: torch.Tensor,
+        speed_probs: torch.Tensor,
+        aeb_probs: torch.Tensor,
+        telemetries: Sequence[Dict[str, Any]],
+    ) -> torch.Tensor:
+        """Synthesize 6 future ego-frame waypoints {(x_k, y_k, v_k)}_{k=1}^6 (t = 0.5s .. 3.0s).
+
+        Combines a single-pass neural trajectory residual head with the minimum-jerk
+        Quintic S-Curve s(tau) = 10*tau^3 - 15*tau^4 + 6*tau^5 and Constant-Time-Headway
+        ACC kinematic prior parameterized by Laya's calibrated decision probabilities.
+        """
+        device = visual_tokens.device
+        bsz = visual_tokens.shape[0]
+        ctx_feat = 0.5 * marker_hidden.mean(dim=1) + 0.5 * visual_tokens.mean(dim=1)
+        neural_res = torch.tanh(self.trajectory_head(ctx_feat)).reshape(bsz, 6, 3)
+
+        speed_tiers = torch.tensor([0.0, 20.0, 40.0, 65.0], dtype=torch.float32, device=device)
+        exp_speed_kmh = (speed_probs * speed_tiers.unsqueeze(0)).sum(dim=-1) * (1.0 - aeb_probs)
+
+        # Lateral target shift (+left = +3.5m, -right = -3.5m) weighted by maneuver probabilities
+        lat_shift_target = (maneuver_probs[:, 1] - maneuver_probs[:, 2]) * 3.5
+
+        taus = torch.linspace(1.0 / 6.0, 1.0, steps=6, dtype=torch.float32, device=device)
+        quintic_s = 10.0 * (taus**3) - 15.0 * (taus**4) + 6.0 * (taus**5)  # (6,)
+
+        waypoints_batch: List[torch.Tensor] = []
+        for b in range(bsz):
+            t_dict = telemetries[b] if b < len(telemetries) else {}
+            v0_kmh = float(t_dict.get("speed_kmh", 30.0))
+            y0_m = float(t_dict.get("lane_offset_m", 0.0))
+            curv = float(t_dict.get("road_curvature", 0.0))
+            lead_d = float(t_dict.get("lead_distance_m", 60.0))
+            lead_v = float(t_dict.get("lead_speed_kmh", 40.0))
+
+            v_tgt = float(exp_speed_kmh[b].item())
+            if lead_d < 38.0 and aeb_probs[b].item() < 0.70:
+                acc_v = max(0.0, min(v_tgt, lead_v + 0.85 * (lead_d - 16.0)))
+                v_tgt = acc_v
+            if abs(curv) > 0.15:
+                v_curv_cap = 3.6 * math.sqrt(2.8 / max(abs(curv) * 0.08, 1e-3))
+                v_tgt = min(v_tgt, v_curv_cap)
+
+            v_k = v0_kmh + (v_tgt - v0_kmh) * quintic_s
+            dt_step = 0.5
+            x_k = torch.cumsum((v_k / 3.6) * dt_step, dim=0)
+            dy_goal = lat_shift_target[b] - y0_m
+            y_k = (
+                y0_m
+                + dy_goal * quintic_s
+                + 0.012 * curv * (x_k**1.35)
+            )
+            wp_b = torch.stack([x_k, y_k, v_k], dim=-1)  # (6, 3)
+            waypoints_batch.append(wp_b)
+
+        kinematic_prior = torch.stack(waypoints_batch, dim=0)  # (B, 6, 3)
+        scale = torch.tensor([1.5, 0.35, 3.0], dtype=torch.float32, device=device).view(1, 1, 3)
+        return kinematic_prior + neural_res * scale
 
 
 class AutonomousDrivingSystem(nn.Module):
@@ -616,17 +694,25 @@ class AutonomousDrivingSystem(nn.Module):
             use_mock=is_mock,
         )
 
+    def reset_temporal_buffer(self) -> None:
+        """Reset temporal token ring buffer in SpatialProjector at episode start."""
+        self.projector.reset_temporal_buffer()
+
     def forward(
         self,
         images: torch.Tensor,
         telemetries: Sequence[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Single forward pass from (B, 3, 196, 392) images + telemetry dicts to decisions."""
+        """Single forward pass from (B, 3, 196, 392) images + telemetry dicts to decisions & trajectory."""
         with torch.no_grad():
             patch_tokens = self.dino(images)  # (B, 392, 768)
         visual_tokens = self.projector(patch_tokens)  # (B, 36, 1024)
+        aux_perception = self.projector.predict_aux_perception(
+            visual_tokens, telemetries=telemetries
+        )
         outputs = self.laya(visual_tokens, telemetries)
         outputs["visual_tokens"] = visual_tokens
+        outputs["aux_perception"] = aux_perception
         return outputs
 
     @torch.no_grad()
@@ -636,7 +722,7 @@ class AutonomousDrivingSystem(nn.Module):
         telemetry: Dict[str, Any],
         device: torch.device,
     ) -> Dict[str, Any]:
-        """Run single-frame closed-loop inference and return structured Python decision dict."""
+        """Run single-frame closed-loop inference and return structured Python decision + trajectory dict."""
         self.eval()
         if not isinstance(rgb_frame, torch.Tensor):
             tensor_img = (
@@ -656,6 +742,20 @@ class AutonomousDrivingSystem(nn.Module):
         m_conf = float(out["maneuver_confidence"][0].item())
         s_conf = float(out["speed_confidence"][0].item())
         aeb_prob = float(out["emergency_brake"][0].item())
+        traj_list = out["predicted_trajectory"][0].detach().cpu().tolist()
+        aux = out["aux_perception"]
+        aux_summary = {
+            "pred_lead_distance_m": round(float(aux["pred_lead_distance_m"][0].item()), 2),
+            "pred_lane_offset_m": round(float(aux["pred_lane_offset_m"][0].item()), 3),
+            "pred_traffic_light": ("green", "yellow", "red")[
+                int(aux["pred_traffic_light_idx"][0].item())
+            ],
+            "pred_hazard_source": ("none", "vehicle", "pedestrian", "red_light")[
+                int(aux["pred_hazard_idx"][0].item())
+            ],
+            "pred_blindspot_left": round(float(aux["pred_blindspot_probs"][0, 0].item()), 3),
+            "pred_blindspot_right": round(float(aux["pred_blindspot_probs"][0, 1].item()), 3),
+        }
 
         return {
             "maneuver": IDX_TO_MANEUVER[m_idx],
@@ -665,4 +765,9 @@ class AutonomousDrivingSystem(nn.Module):
             "target_speed_kmh": SPEED_LEVEL_KMH[s_lvl],
             "speed_confidence": s_conf,
             "emergency_brake": aeb_prob,
+            "predicted_trajectory": [
+                [round(float(p[0]), 2), round(float(p[1]), 3), round(float(p[2]), 2)]
+                for p in traj_list
+            ],
+            "aux_perception": aux_summary,
         }

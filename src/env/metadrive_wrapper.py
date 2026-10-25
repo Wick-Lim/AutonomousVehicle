@@ -29,6 +29,8 @@ class TelemetryState:
     expert_maneuver: Optional[str] = None
     traffic_light: str = "green"
     hazard_source: str = "none"
+    blind_spot_left: bool = False
+    blind_spot_right: bool = False
 
     def to_json_dict(self) -> Dict[str, Any]:
         """Convert telemetry to a clean, rounded dictionary for JSON serialization into Laya."""
@@ -45,6 +47,8 @@ class TelemetryState:
             "expert_maneuver": self.expert_maneuver,
             "traffic_light": str(self.traffic_light),
             "hazard_source": str(self.hazard_source),
+            "blind_spot_left": bool(self.blind_spot_left),
+            "blind_spot_right": bool(self.blind_spot_right),
         }
 
 

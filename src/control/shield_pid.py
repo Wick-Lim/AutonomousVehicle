@@ -178,8 +178,30 @@ class SafetyShieldPID:
                 gated_maneuver = "keep_lane"
                 shield_triggered = True
                 shield_reason = "boundary_right_unavailable"
+            # 360-Degree Surround Blind-Spot Interlock: block lane change if adjacent rear/side zone is occupied
+            elif gated_maneuver == "change_left" and bool(
+                telemetry.get("blind_spot_left", False)
+            ):
+                gated_maneuver = "keep_lane"
+                shield_triggered = True
+                shield_reason = "blindspot_left_occupied"
+            elif gated_maneuver == "change_right" and bool(
+                telemetry.get("blind_spot_right", False)
+            ):
+                gated_maneuver = "keep_lane"
+                shield_triggered = True
+                shield_reason = "blindspot_right_occupied"
 
         target_speed_kmh = SPEED_LEVEL_KMH.get(gated_speed_level, 20.0)
+        # Curvature-coupled cornering speed regulation: v_max(kappa) = sqrt(a_lat_max / max(|kappa|, 1e-3))
+        road_curv_abs = abs(float(telemetry.get("road_curvature", 0.0)))
+        effective_kappa = road_curv_abs * 0.065
+        mpc_cornering_cap_kmh = float(
+            min(65.0, 3.6 * np.sqrt(2.85 / max(effective_kappa, 1e-3)))
+        )
+        if not self.use_mock and road_curv_abs > 0.22 and gated_speed_level > 0:
+            target_speed_kmh = min(target_speed_kmh, max(20.0, mpc_cornering_cap_kmh))
+
         if gated_maneuver == "follow_lead" and gated_speed_level >= 2:
             target_speed_kmh = min(target_speed_kmh, 30.0)
         if lead_distance_m < 52.0 and gated_speed_level > 0:
@@ -218,11 +240,33 @@ class SafetyShieldPID:
             "maneuver": gated_maneuver,
             "speed_level": gated_speed_level,
             "target_speed_kmh": target_speed_kmh,
+            "mpc_cornering_cap_kmh": round(mpc_cornering_cap_kmh, 1),
             "maneuver_confidence": maneuver_conf,
             "emergency_brake": aeb_prob,
             "shield_triggered": shield_triggered,
             "shield_reason": shield_reason,
+            "blind_spot_left": bool(telemetry.get("blind_spot_left", False)),
+            "blind_spot_right": bool(telemetry.get("blind_spot_right", False)),
         }
+
+    def compute_mpc_feedforward(
+        self,
+        decision: Dict[str, Any],
+        telemetry: Dict[str, Any],
+    ) -> float:
+        """Compute Kinematic Bicycle MPC feedforward steering command (wheelbase L = 2.85m)."""
+        wheelbase_m = 2.85
+        road_curv = float(telemetry.get("road_curvature", 0.0))
+        pred_traj = decision.get("predicted_trajectory")
+        traj_curv = 0.0
+        if isinstance(pred_traj, list) and len(pred_traj) >= 3:
+            # Lookahead waypoint k=2 (t = 1.5s) in ego coordinates (x_fwd, y_left)
+            lx = max(3.5, float(pred_traj[2][0]))
+            ly = float(pred_traj[2][1]) - float(telemetry.get("lane_offset_m", 0.0))
+            traj_curv = (2.0 * ly) / (lx * lx + ly * ly)
+        eff_curv = 0.70 * (-road_curv * 0.045) + 0.30 * traj_curv
+        delta_rad = float(np.arctan(wheelbase_m * eff_curv))
+        return float(np.clip(delta_rad / 0.70, -0.35, 0.35))
 
     def compute_control(
         self,
@@ -257,8 +301,12 @@ class SafetyShieldPID:
         lateral_error = (target_offset_m - lane_offset_m) - (
             self.heading_weight * heading_error
         )
-        raw_target_steering = float(
+        pid_steering = float(
             np.clip(self.lateral_pid.step(lateral_error, dt=dt), -1.0, 1.0)
+        )
+        mpc_ff = 0.0 if self.use_mock else self.compute_mpc_feedforward(decision, telemetry)
+        raw_target_steering = float(
+            np.clip(pid_steering + 0.12 * mpc_ff, -1.0, 1.0)
         )
 
         # Linear Steering Ramp ([steer_from -> steer_to]) with speed-adaptive rate limiting
@@ -298,6 +346,7 @@ class SafetyShieldPID:
         gated["steer_to"] = round(steering, 4)
         gated["steer_target"] = round(raw_target_steering, 4)
         gated["steer_delta"] = round(steering - steer_from, 4)
+        gated["mpc_feedforward"] = round(mpc_ff, 4)
         gated["steer_ramp_substeps"] = [
             round(steer_from + (k / 5.0) * (steering - steer_from), 4)
             for k in range(1, 6)

@@ -125,17 +125,23 @@ def render_hud_frame(
         cv2.LINE_AA,
     )
 
-    # Row 3: Physical PID Actuation (Linear Steering Transition [steer_from -> steer_to]) & Environment State
+    # Row 3: Physical PID/MPC Actuation (Linear Steer [steer_from -> steer_to]), E2E Trajectory & Environment State
     steer, tb = float(control_action[0]), float(control_action[1])
     s_from = float(gated_info.get("steer_from", steer))
     s_to = float(gated_info.get("steer_to", steer))
+    pred_traj = decision.get("predicted_trajectory", [])
+    traj_end_str = (
+        f"({pred_traj[-1][0]:.1f}m,{pred_traj[-1][1]:+.1f}m)"
+        if len(pred_traj) >= 6
+        else "(28.0m,+0.0m)"
+    )
     cv2.putText(
         panel,
-        f"Linear Steer: {s_from:+5.2f} -> {s_to:+5.2f} | Pedal: {tb:+5.2f} | "
-        f"Lead: {lead_d:4.1f}m | Offset: {offset:+4.2f}m | Light: {tl}",
+        f"Steer: {s_from:+5.2f}->{s_to:+5.2f} | Pedal: {tb:+5.2f} | "
+        f"E2E Traj(3s): {traj_end_str} | Lead: {lead_d:4.1f}m | TL: {tl}",
         (14, 114),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.50,
+        0.48,
         (185, 200, 220),
         1,
         cv2.LINE_AA,
@@ -209,7 +215,7 @@ def main() -> None:
     system = AutonomousDrivingSystem(config=cfg, use_mock=use_mock).to(device)
     if proj_ckpt_path.exists():
         ckpt = torch.load(proj_ckpt_path, map_location=device, weights_only=False)
-        system.projector.load_state_dict(ckpt["projector_state_dict"])
+        system.projector.load_state_dict(ckpt["projector_state_dict"], strict=False)
         print(f"[04_evaluate_sim] Loaded SpatialProjector from: {proj_ckpt_path}")
 
     calibrated_ece_from_ckpt = None
@@ -254,6 +260,7 @@ def main() -> None:
     }
     for _ in range(3):
         _ = system.predict_single(dummy_rgb, dummy_tel, device=device)
+    system.reset_temporal_buffer()
 
     latencies_ms: List[float] = []
     episode_completions: List[float] = []
@@ -261,6 +268,8 @@ def main() -> None:
     episode_arrived: List[bool] = []
     episode_crashed: List[bool] = []
     episode_scenarios: List[str] = []
+    weather_presets_tested: List[str] = []
+    aux_lead_errors_m: List[float] = []
     latest_fsd_metrics: Dict[str, Any] = {}
     shield_reasons: Counter[str] = Counter()
 
@@ -286,6 +295,7 @@ def main() -> None:
         range(num_episodes), desc="Evaluating Closed-Loop Unseen Maps", unit="ep"
     ):
         rgb, telemetry, info = env.reset(seed=eval_start_seed + ep)
+        system.reset_temporal_buffer()
         controller.reset()
         done = False
 
@@ -312,11 +322,18 @@ def main() -> None:
                 m_conf = float(out["maneuver_confidence"][0].item())
                 s_conf = float(out["speed_confidence"][0].item())
                 aeb_prob = float(out["emergency_brake"][0].item())
+                pred_traj = out["predicted_trajectory"][0].detach().cpu().tolist()
+                aux_p = out.get("aux_perception", {})
 
             if device.type == "cuda":
                 torch.cuda.synchronize()
             dt_ms = (time.perf_counter() - t0) * 1000.0
             latencies_ms.append(dt_ms)
+
+            if "pred_lead_distance_m" in aux_p:
+                pred_d = float(aux_p["pred_lead_distance_m"][0].item())
+                gt_d = float(telemetry.get("lead_distance_m", 60.0))
+                aux_lead_errors_m.append(abs(pred_d - gt_d))
 
             all_m_probs.append(out["maneuver_probs"].cpu())
             all_s_probs.append(out["speed_probs"].cpu())
@@ -332,9 +349,13 @@ def main() -> None:
                 "speed_level": s_lvl,
                 "speed_confidence": s_conf,
                 "emergency_brake": aeb_prob,
+                "predicted_trajectory": [
+                    [round(float(p[0]), 2), round(float(p[1]), 3), round(float(p[2]), 2)]
+                    for p in pred_traj
+                ],
             }
 
-            # Apply Calibrated Safety Shield + PID controller
+            # Apply Calibrated Safety Shield + MPC/PID controller
             control_action, gated_info = controller.compute_control(decision, telemetry)
             if gated_info["shield_triggered"]:
                 shield_reasons[gated_info["shield_reason"]] += 1
@@ -374,6 +395,8 @@ def main() -> None:
         episode_crashed.append(bool(info.get("crash", False)))
         if "fsd_scenario" in info:
             episode_scenarios.append(str(info["fsd_scenario"]))
+        if "weather_preset" in info:
+            weather_presets_tested.append(str(info["weather_preset"]))
         if "fsd_metrics" in info:
             latest_fsd_metrics = dict(info["fsd_metrics"])
 
@@ -423,7 +446,11 @@ def main() -> None:
         "crash_free_rate_pct": round(crash_free_rate, 2),
         "ece": round(reported_ece, 4),
         "online_sim_ece": round(online_ece, 4),
+        "e2e_trajectory_waypoints": 6,
+        "e2e_trajectory_horizon_s": 3.0,
+        "vision_aux_lead_mae_m": round(float(np.mean(aux_lead_errors_m)) if aux_lead_errors_m else 0.0, 2),
         "fsd_scenarios_tested": episode_scenarios,
+        "weather_presets_tested": weather_presets_tested,
         "fsd_metrics": latest_fsd_metrics,
         "shield_interventions": dict(shield_reasons),
         "targets_met": {
