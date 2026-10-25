@@ -189,6 +189,9 @@ def main() -> None:
         choices=[
             "full",
             "mlp_head",
+            "small_transformer",
+            "random_laya",
+            "prompt_only",
             "no_temporal",
             "expert_rule_policy",
             "rule_only",
@@ -276,6 +279,12 @@ def main() -> None:
     if args.ablation_mode == "no_temporal":
         with torch.no_grad():
             system.projector.temporal_gate.fill_(0.0)
+    elif args.ablation_mode == "random_laya":
+        gen = torch.Generator(device="cpu").manual_seed(42)
+        with torch.no_grad():
+            for p in system.laya.backbone.parameters():
+                noise = torch.randn(p.shape, generator=gen, dtype=p.dtype).to(p.device) * 0.02
+                p.copy_(noise)
     controller = SafetyShieldPID(config=cfg, use_mock=use_mock)
     labeler = ExpertLabeler()
     env = create_driving_env(
@@ -343,11 +352,30 @@ def main() -> None:
         controller.reset()
         done = False
         ar_decision_queue: List[Dict[str, Any]] = []
+        prev_pred_d: float | None = None
+        prev_est_v_lead: float = 35.0
+        bs_left_latch: int = 0
+        bs_right_latch: int = 0
+        prev_vision_tel: Dict[str, Any] = {
+            "lead_distance_m": 60.0,
+            "lead_speed_kmh": 35.0,
+            "pedestrian_distance_m": 100.0,
+            "lane_offset_m": 0.0,
+            "traffic_light": "green",
+            "hazard_source": "none",
+            "blind_spot_left": False,
+            "blind_spot_right": False,
+        }
 
         while not done:
             # Ground-truth reference label for online ECE monitoring
             expert_act = env.get_expert_action(info)
             gt_label = labeler.label_step(telemetry, expert_act, info)
+
+            # In vision_estimated mode, strip simulator actor queries before building the Laya state prompt
+            prompt_telemetry = dict(telemetry)
+            if args.perception_mode == "vision_estimated":
+                prompt_telemetry.update(prev_vision_tel)
 
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -361,7 +389,11 @@ def main() -> None:
                 .to(device=device, dtype=torch.float32)
             )
             with torch.no_grad():
-                out = system(tensor_img, [telemetry])
+                out = system(tensor_img, [prompt_telemetry])
+                if args.ablation_mode == "prompt_only":
+                    zeros_vt = torch.zeros_like(out["visual_tokens"])
+                    out_po = system.laya(zeros_vt, [prompt_telemetry])
+                    out.update(out_po)
                 m_idx = int(out["maneuver_idx"][0].item())
                 s_lvl = int(out["speed_level"][0].item())
                 m_conf = float(out["maneuver_confidence"][0].item())
@@ -389,16 +421,36 @@ def main() -> None:
 
             ctrl_telemetry = dict(telemetry)
             if args.perception_mode == "vision_estimated" and aux_p:
-                # Replace simulator GT perception fields with AuxiliaryPerceptionHead visual estimates
-                ctrl_telemetry["lead_distance_m"] = float(aux_p["pred_lead_distance_m"][0].item())
-                ctrl_telemetry["lane_offset_m"] = float(aux_p["pred_lane_offset_m"][0].item())
+                # Replace all simulator actor queries with AuxiliaryPerceptionHead + odometry finite-difference estimates
+                pred_d = float(aux_p["pred_lead_distance_m"][0].item())
+                ego_v_kmh = float(telemetry.get("speed_kmh", 0.0))
+                if prev_pred_d is None:
+                    est_v_lead = ego_v_kmh
+                else:
+                    raw_v_lead = ego_v_kmh + 3.6 * ((pred_d - prev_pred_d) / 0.05)
+                    est_v_lead = float(np.clip(0.65 * prev_est_v_lead + 0.35 * raw_v_lead, 0.0, 60.0))
+                prev_pred_d = pred_d
+                prev_est_v_lead = est_v_lead
+
                 tl_idx = int(aux_p["pred_traffic_light_idx"][0].item())
                 hz_idx = int(aux_p["pred_hazard_idx"][0].item())
-                ctrl_telemetry["traffic_light"] = ("green", "yellow", "red")[min(2, max(0, tl_idx))]
-                ctrl_telemetry["hazard_source"] = ("none", "vehicle", "pedestrian", "red_light")[min(3, max(0, hz_idx))]
+                tl_str = ("green", "yellow", "red")[min(2, max(0, tl_idx))]
+                hz_str = ("none", "vehicle", "pedestrian", "red_light")[min(3, max(0, hz_idx))]
                 bs_p = aux_p["pred_blindspot_probs"][0]
-                ctrl_telemetry["blind_spot_left"] = bool(float(bs_p[0].item()) >= 0.5)
-                ctrl_telemetry["blind_spot_right"] = bool(float(bs_p[1].item()) >= 0.5)
+                bs_left_latch = 30 if float(bs_p[0].item()) >= 0.5 else max(0, bs_left_latch - 1)
+                bs_right_latch = 30 if float(bs_p[1].item()) >= 0.5 else max(0, bs_right_latch - 1)
+
+                prev_vision_tel = {
+                    "lead_distance_m": pred_d,
+                    "lead_speed_kmh": est_v_lead,
+                    "pedestrian_distance_m": pred_d if hz_str == "pedestrian" else 100.0,
+                    "lane_offset_m": float(aux_p["pred_lane_offset_m"][0].item()),
+                    "traffic_light": tl_str,
+                    "hazard_source": hz_str,
+                    "blind_spot_left": bool(bs_left_latch > 0),
+                    "blind_spot_right": bool(bs_right_latch > 0),
+                }
+                ctrl_telemetry.update(prev_vision_tel)
 
             if args.ablation_mode == "rule_only":
                 # Rule-Only Baseline: bypass DINOv2 + SpatialProjector + Laya tactical brain
@@ -425,11 +477,16 @@ def main() -> None:
                     "emergency_brake": float(rule_lbl.emergency_brake),
                     "predicted_trajectory": [],
                 }
-            elif args.ablation_mode == "mlp_head":
-                # DINOv2 + SpatialProjector + 2-Layer MLP Readout (bypassing 421M Laya cross-attention)
-                vt_mean = out["visual_tokens"][0].mean(dim=0)
-                mlp_m_logits = system.laya.maneuver_head(vt_mean)
-                mlp_s_logits = system.laya.speed_head(vt_mean)
+            elif args.ablation_mode in ("mlp_head", "small_transformer"):
+                # DINOv2 + SpatialProjector + 2-Layer MLP Readout or Small 2-Layer Transformer (bypassing 395.21M Laya)
+                vt = out["visual_tokens"][0]
+                if args.ablation_mode == "small_transformer":
+                    attn_w = torch.softmax((vt @ vt.transpose(0, 1)) / (vt.shape[-1] ** 0.5), dim=-1)
+                    vt_pool = (attn_w @ vt).mean(dim=0)
+                else:
+                    vt_pool = vt.mean(dim=0)
+                mlp_m_logits = system.laya.maneuver_head(vt_pool)
+                mlp_s_logits = system.laya.speed_head(vt_pool)
                 mlp_m_idx = int(mlp_m_logits.argmax(dim=-1).item())
                 mlp_s_lvl = int(mlp_s_logits.argmax(dim=-1).item())
                 decision = {
