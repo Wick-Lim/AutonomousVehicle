@@ -368,9 +368,8 @@ def main() -> None:
         video_writer.release()
     if args.render:
         cv2.destroyAllWindows()
-    env.close()
 
-    # Compute KPIs
+    # Compute KPIs before closing simulator connection
     mean_latency_ms = float(np.mean(latencies_ms))
     p95_latency_ms = float(np.percentile(latencies_ms, 95))
     fps = 1000.0 / max(1e-3, mean_latency_ms)
@@ -449,7 +448,9 @@ def main() -> None:
     print("-" * 74)
     print(f"  Safety Shield Interventions: {dict(shield_reasons)}")
     print(f"  Metrics saved to           : {eval_out_path}")
-    print("=" * 74)
+    print("=" * 74, flush=True)
+
+    env.close()
 
 
 if __name__ == "__main__":

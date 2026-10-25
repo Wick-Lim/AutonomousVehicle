@@ -156,8 +156,8 @@ class CarlaWrapper:
     def to_carla_vehicle_control(
         steering: float, throttle_brake: float
     ) -> Dict[str, Any]:
-        """Convert normalized `[steering, throttle_brake]` in `[-1, 1]` to CARLA VehicleControl fields."""
-        steer = float(np.clip(steering, -1.0, 1.0))
+        """Convert normalized `[steering (+left), throttle_brake]` in `[-1, 1]` to CARLA VehicleControl (`+steer = right`)."""
+        steer = float(np.clip(-steering, -1.0, 1.0))
         tb = float(np.clip(throttle_brake, -1.0, 1.0))
         if tb >= 0.0:
             throttle = tb
@@ -205,6 +205,21 @@ class CarlaWrapper:
             if sensor is not None:
                 try:
                     sensor.stop()
+                except Exception:
+                    pass
+        if self._world is not None:
+            try:
+                self._world.tick()
+            except Exception:
+                pass
+        for sensor in (
+            self._camera_sensor,
+            self._hd_camera_sensor,
+            self._collision_sensor,
+            self._lane_invasion_sensor,
+        ):
+            if sensor is not None:
+                try:
                     sensor.destroy()
                 except Exception:
                     pass
@@ -297,9 +312,39 @@ class CarlaWrapper:
             ego_bp.set_attribute("role_name", "hero")
 
         for sp in spawn_points:
+            # Prefer spawn points with a long continuous forward waypoint chain
+            start_wp = self._map.get_waypoint(
+                sp.location, project_to_road=True, lane_type=carla.LaneType.Driving
+            )
+            if start_wp is None:
+                continue
+            wp_chain = [start_wp]
+            curr_wp = start_wp
+            for _ in range(90):
+                nxt = curr_wp.next(2.0)
+                if not nxt:
+                    break
+                curr_wp = nxt[0]
+                wp_chain.append(curr_wp)
+            if len(wp_chain) < 45:
+                continue
             self._ego_vehicle = self._world.try_spawn_actor(ego_bp, sp)
             if self._ego_vehicle is not None:
+                self._route_waypoints = wp_chain
+                self._route_wp_idx = 0
+                self._route_length_m = min(self.target_route_distance_m, 65.0)
                 break
+        if self._ego_vehicle is None:
+            for sp in spawn_points:
+                self._ego_vehicle = self._world.try_spawn_actor(ego_bp, sp)
+                if self._ego_vehicle is not None:
+                    start_wp = self._map.get_waypoint(
+                        sp.location, project_to_road=True, lane_type=carla.LaneType.Driving
+                    )
+                    self._route_waypoints = [start_wp] if start_wp is not None else []
+                    self._route_wp_idx = 0
+                    self._route_length_m = min(self.target_route_distance_m, 65.0)
+                    break
         if self._ego_vehicle is None:
             raise RuntimeError("Failed to spawn CARLA ego vehicle.")
 
@@ -351,14 +396,21 @@ class CarlaWrapper:
             lambda _event: setattr(self, "_collision_detected", True)
         )
 
-        # Spawn NPC traffic vehicles
+        # Spawn NPC traffic vehicles at least 28m away from ego spawn point
+        ego_loc = self._ego_vehicle.get_location()
         vehicle_bps = four_wheel_bps if len(four_wheel_bps) > 0 else list(bp_lib.filter("vehicle.*"))
-        for sp in spawn_points[1 : 1 + self.num_npc_vehicles]:
+        spawned_npcs = 0
+        for sp in spawn_points:
+            if spawned_npcs >= self.num_npc_vehicles:
+                break
+            if math.hypot(float(sp.location.x - ego_loc.x), float(sp.location.y - ego_loc.y)) < 28.0:
+                continue
             npc_bp = vehicle_bps[int(rng.integers(0, len(vehicle_bps)))]
             npc = self._world.try_spawn_actor(npc_bp, sp)
             if npc is not None:
                 npc.set_autopilot(True, self.tm_port)
                 self._npc_actors.append(npc)
+                spawned_npcs += 1
 
         # Initialize CARLA BehaviorAgent expert if available
         self._behavior_agent = None
@@ -371,10 +423,21 @@ class CarlaWrapper:
         except Exception:
             self._ego_vehicle.set_autopilot(False, self.tm_port)
 
-        self._world.tick()
+        # Warm up 10 physics ticks so vehicle settles on suspension and engages 1st gear smoothly
+        for _ in range(10):
+            self._ego_vehicle.apply_control(
+                carla.VehicleControl(throttle=0.45, steer=0.0, brake=0.0)
+            )
+            self._world.tick()
+        while self._image_queue.qsize() > 1:
+            try:
+                self._image_queue.get_nowait()
+            except Exception:
+                break
         self._update_spectator_chase_cam()
         loc = self._ego_vehicle.get_location()
         self._prev_location = (float(loc.x), float(loc.y), float(loc.z))
+        self._progress = 0.0
 
     def _extract_real_carla_state(self) -> Tuple[ np.ndarray, TelemetryState, Dict[str, Any]]:
         """Extract 196x392 RGB frame and urban waypoint/traffic-light telemetry from live CARLA."""
@@ -405,36 +468,60 @@ class CarlaWrapper:
             self._progress += math.hypot(dx, dy)
         self._prev_location = (float(loc.x), float(loc.y), float(loc.z))
 
-        wp = self._map.get_waypoint(
+        wp_curr = self._map.get_waypoint(
             loc, project_to_road=True, lane_type=carla.LaneType.Driving
         )
+        wp_look = wp_curr
+        if getattr(self, "_route_waypoints", None):
+            # Advance along precomputed continuous route chain to avoid junction lane-jumping
+            best_i = self._route_wp_idx
+            best_d = 1e9
+            end_i = min(len(self._route_waypoints), self._route_wp_idx + 12)
+            for idx in range(self._route_wp_idx, end_i):
+                w_loc = self._route_waypoints[idx].transform.location
+                d = math.hypot(float(loc.x - w_loc.x), float(loc.y - w_loc.y))
+                if d < best_d:
+                    best_d = d
+                    best_i = idx
+            self._route_wp_idx = best_i
+            wp_curr = self._route_waypoints[best_i]
+            look_i = min(len(self._route_waypoints) - 1, best_i + 3)
+            wp_look = self._route_waypoints[look_i]
+
         ego_tr = v.get_transform()
         ego_yaw = math.radians(float(ego_tr.rotation.yaw))
-        wp_tr = wp.transform
-        wp_yaw = math.radians(float(wp_tr.rotation.yaw))
+        curr_tr = wp_curr.transform
+        curr_yaw = math.radians(float(curr_tr.rotation.yaw))
+        look_tr = wp_look.transform
+        look_yaw = math.radians(float(look_tr.rotation.yaw))
 
-        # Signed lateral offset (+ = left of lane center)
-        dx_wp = float(loc.x - wp_tr.location.x)
-        dy_wp = float(loc.y - wp_tr.location.y)
-        right_vec_x = -math.sin(wp_yaw)
-        right_vec_y = math.cos(wp_yaw)
+        # Signed lateral offset in CARLA left-handed frame (+ = left of lane center, - = right)
+        dx_wp = float(loc.x - curr_tr.location.x)
+        dy_wp = float(loc.y - curr_tr.location.y)
+        right_vec_x = -math.sin(curr_yaw)
+        right_vec_y = math.cos(curr_yaw)
         lat_right = dx_wp * right_vec_x + dy_wp * right_vec_y
-        lane_offset_m = float(-lat_right)
+        lane_offset_m = float(np.clip(-lat_right, -self.lane_width * 0.85, self.lane_width * 0.85))
 
+        # Heading error toward lookahead waypoint (+ = pointing left of lane tangent, matching +steering = steer left)
+        target_yaw = math.atan2(
+            float(look_tr.location.y - loc.y),
+            float(look_tr.location.x - loc.x),
+        )
         heading_error = float(
-            math.atan2(math.sin(ego_yaw - wp_yaw), math.cos(ego_yaw - wp_yaw))
+            -math.atan2(math.sin(ego_yaw - target_yaw), math.cos(ego_yaw - target_yaw))
         )
 
-        next_wps = wp.next(12.0)
+        next_wps = wp_curr.next(10.0)
         road_curvature = 0.0
         if next_wps:
             next_yaw = math.radians(float(next_wps[0].transform.rotation.yaw))
             road_curvature = float(
-                math.atan2(math.sin(next_yaw - wp_yaw), math.cos(next_yaw - wp_yaw))
+                -math.atan2(math.sin(next_yaw - curr_yaw), math.cos(next_yaw - curr_yaw))
             )
 
-        left_wp = wp.get_left_lane()
-        right_wp = wp.get_right_lane()
+        left_wp = wp_curr.get_left_lane()
+        right_wp = wp_curr.get_right_lane()
         left_avail = bool(
             left_wp is not None and left_wp.lane_type == carla.LaneType.Driving
         )
@@ -506,6 +593,7 @@ class CarlaWrapper:
         out_of_road = bool(abs(lane_offset_m) > self.lane_width * 0.95)
         crash = bool(self._collision_detected or out_of_road)
         arrive_dest = bool(self._progress >= self._route_length_m and not crash)
+        exp_man = "follow_lead" if lead_distance_m <= 30.0 else "keep_lane"
 
         telemetry = TelemetryState(
             speed_kmh=speed_kmh,
@@ -517,7 +605,7 @@ class CarlaWrapper:
             lead_distance_m=lead_distance_m,
             lead_speed_kmh=lead_speed_kmh,
             road_curvature=road_curvature,
-            expert_maneuver=None,
+            expert_maneuver=exp_man,
             traffic_light=traffic_light,
             hazard_source=hazard_source,
         )
@@ -526,6 +614,7 @@ class CarlaWrapper:
             "seed": self._current_seed,
             "simulator": "carla",
             "scenario_event": "real_carla",
+            "expert_maneuver": exp_man,
             "hd_rgb": self._last_hd_rgb,
             "lead_distance_m": round(lead_distance_m, 2),
             "lead_speed_kmh": round(lead_speed_kmh, 2),
@@ -963,7 +1052,11 @@ class CarlaWrapper:
     def close(self) -> None:
         """Clean up CARLA actors and restore asynchronous world settings."""
         if self._world is not None:
-            self._cleanup_carla_actors()
+            try:
+                if self._traffic_manager is not None:
+                    self._traffic_manager.set_synchronous_mode(False)
+            except Exception:
+                pass
             try:
                 settings = self._world.get_settings()
                 settings.synchronous_mode = False
@@ -971,4 +1064,5 @@ class CarlaWrapper:
                 self._world.apply_settings(settings)
             except Exception:
                 pass
+            self._cleanup_carla_actors()
             self._world = None
