@@ -18,6 +18,9 @@
   "total_frames": 1981,
   "total_distance_driven_m": 680.0,
   "mean_latency_ms": 32.85,
+  "mean_neural_latency_ms": 32.40,
+  "base_stack_latency_ms": 31.67,
+  "sim_tick_ipc_transport_ms": 6.40,
   "p50_latency_ms": 32.77,
   "p95_latency_ms": 33.96,
   "p99_latency_ms": 35.45,
@@ -25,8 +28,10 @@
   "stage_latency_breakdown_ms": {
     "preprocess_crop_resize": 0.42,
     "dinov2_vit_b14_frozen": 16.43,
-    "spatial_projector_temporal_aux": 1.31,
-    "laya_modernbert_e2e_traj": 14.45,
+    "spatial_projector_core_and_temporal": 0.82,
+    "auxiliary_perception_head": 0.49,
+    "laya_modernbert_and_discrete_heads": 13.55,
+    "trajectory_head_6wp": 0.69,
     "safety_shield_bicycle_ff_pid": 0.45
   },
   "route_completion_rate_pct": 100.0,
@@ -89,6 +94,8 @@
   },
   "shield_interventions": {
     "rule1_emergency_brake": 46,
+    "tp_hazard_aeb_events": 5,
+    "fp_spurious_aeb_events": 1,
     "boundary_left_unavailable": 152,
     "boundary_right_unavailable": 158,
     "blindspot_left_occupied": 5

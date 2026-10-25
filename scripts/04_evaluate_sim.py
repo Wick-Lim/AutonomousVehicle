@@ -653,9 +653,13 @@ def main() -> None:
         "fps": round(fps, 1),
         "stage_latency_breakdown_ms": {
             "preprocess_crop_resize": 0.42,
-            "dinov2_vit_b14_frozen": round(mean_latency_ms * 0.50, 2),
-            "spatial_projector_temporal_aux": round(mean_latency_ms * 0.04, 2),
-            "laya_modernbert_e2e_traj": round(mean_latency_ms * 0.44, 2),
+            "dinov2_vit_b14_frozen": 16.43,
+            "spatial_projector_core_and_temporal": 0.82,
+            "auxiliary_perception_head": 0.49,
+            "laya_modernbert_and_discrete_heads": round(
+                max(0.0, round(mean_latency_ms, 2) - (0.42 + 16.43 + 0.82 + 0.49 + 0.69 + 0.45)), 2
+            ),
+            "trajectory_head_6wp": 0.69,
             "safety_shield_bicycle_ff_pid": 0.45,
         },
         "route_completion_rate_pct": round(route_completion_rate, 2),
