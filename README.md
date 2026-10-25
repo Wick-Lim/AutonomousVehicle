@@ -6,12 +6,12 @@
 
 ---
 
-## 🎬 실시간 폐루프 자율주행 데모 (CARLA 0.9.16 `Town10HD_Opt` 5대 FSD 시나리오)
+## 🎬 실시간 폐루프 자율주행 데모 (`driving_demo_carla_smooth` — CARLA 0.9.16 `Town10HD_Opt` 5대 FSD 시나리오)
 
 <p align="center">
-  <img src="assets/carla_fsd_demo.gif" width="840" alt="CARLA 0.9.16 Urban FSD Demo" />
+  <img src="assets/driving_demo_carla_smooth.gif" width="840" alt="CARLA 0.9.16 Smooth Urban FSD Demo" />
   <br/>
-  🎥 <b><a href="assets/carla_fsd_demo.mp4">고화질 원본 MP4 영상 보기 (assets/carla_fsd_demo.mp4)</a></b>
+  🎥 <b><a href="assets/driving_demo_carla_smooth.mp4">고화질 원본 MP4 영상 보기 (assets/driving_demo_carla_smooth.mp4)</a></b>
   <br/>
   <sub>31.67 ms / 31.6 FPS · 완주율 100.0% · 무사고율 100.0% · CARLA Driving Score 100.0% (5차 S-커브 궤적 보간 & ACC 속도 동조 적용)</sub>
 </p>
