@@ -121,14 +121,19 @@ Because $s(0)=0, s(1)=1$ and $s'(0)=s'(1)=s''(0)=s''(1)=0$, the resulting 3D ref
 \subsection{Continuous Polyline Projection and Linear Steering Ramp}
 Rather than snapping to discrete $2.0\text{ m}$ waypoints, we project the ego position $p_{\text{ego}} = (x, y)$ onto the active line segment $\overline{P_i P_{i+1}}$ via continuous parameter $t_{\text{seg}} \in [0, 1]$ to obtain the exact projected point $P_{\text{proj}}$ and interpolate a continuous lookahead point $P_{\text{look}}$ at arc-length $L_{\text{look}} = \text{clip}(7.5 + 0.18 v_{\text{kmh}}, 7.5, 13.5)\text{ m}$ ahead along the polyline. Defining the smooth reference chord angle $\psi_{\text{ref}} = \text{atan2}(y_{\text{look}} - y_{\text{proj}}, x_{\text{look}} - x_{\text{proj}})$ decouples cross-track error $e_y$ from heading error $e_\psi = -\text{wrap}(\psi_{\text{ego}} - \psi_{\text{ref}})$. Furthermore, steering commands transition linearly across each control interval $[\delta_{\text{from}} \to \delta_{\text{to}}]$ with speed-adaptive rate limiting:
 \begin{equation}
-    \Delta \delta_{\max} = \frac{1.1 \Delta t}{1.0 + 0.012 v_{\text{kmh}}}, \quad
-    \delta_t = \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{PID}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big).
+\begin{aligned}
+    \Delta \delta_{\max} &= \frac{1.1 \Delta t}{1.0 + 0.012 v_{\text{kmh}}}, \\
+    \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{PID}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big).
+\end{aligned}
 \end{equation}
 
 \subsection{Constant-Time-Headway ACC Speed Synchronization}
 To prevent stop-and-go oscillation between discrete speed classes ($20\text{ km/h}$ vs. $35\text{ km/h}$) when following a lead vehicle ($d_{\text{lead}} < 38\text{ m}, v_{\text{lead}} \ge 8\text{ km/h}$), we formulate a continuous Constant-Time-Headway ACC target velocity:
 \begin{equation}
-    v_{\text{ACC}} = \text{clip}\!\Big(v_{\text{lead}} + k_g \big(d_{\text{lead}} - d^*\big),\, 0,\, \min(35.0, v_{\text{lead}} + 6.0)\Big),
+\begin{aligned}
+    v_{\text{raw}} &= v_{\text{lead}} + k_g \big(d_{\text{lead}} - d^*\big), \\
+    v_{\text{ACC}} &= \text{clip}\!\big(v_{\text{raw}},\, 0,\, \min(35.0, v_{\text{lead}} + 6.0)\big),
+\end{aligned}
 \end{equation}
 where $d^* = 16.0\text{ m}$ is the desired urban following gap and $k_g = 0.85\text{ s}^{-1}$. As shown in Fig.~\ref{fig:kinematics}b, $v_{\text{ego}}$ smoothly locks onto $v_{\text{lead}} = 24.0\text{ km/h}$ at $d_{\text{lead}} \approx 16.0\text{ m}$ with zero false emergency brake triggers.
 
@@ -160,15 +165,17 @@ where $d^* = 16.0\text{ m}$ is the desired urban following gap and $k_g = 0.85\t
 \centering
 \caption{Ablation Study on Trajectory Smoothing and ACC Synchronization in CARLA 0.9.16 (5 Urban FSD Scenarios).}
 \label{tab:ablation}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{lccc}
 \toprule
-\textbf{Control Variant} & \textbf{AEB Interventions} & \textbf{Steer Jerk} & \textbf{Driving Score} \\
+\textbf{Control Variant} & \textbf{AEB Count} & \textbf{Steer Jerk} & \textbf{Driving Score} \\
 \midrule
-Discrete WP + Step Lane Switch & 71 & High & 100.0\% \\
+Discrete WP + Step Switch & 71 & High & 100.0\% \\
 + Linear Steer Ramp $[\delta_{\text{from}} \to \delta_{\text{to}}]$ & 71 & Moderate & 100.0\% \\
-\textbf{+ Quintic S-Curve \& ACC Sync (Ours)} & \textbf{27} & \textbf{Minimal} & \textbf{100.0\%} \\
+\textbf{+ Quintic S-Curve \& ACC (Ours)} & \textbf{27} & \textbf{Minimal} & \textbf{100.0\%} \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}
 
 \section{Experimental Evaluation}
