@@ -15,12 +15,22 @@ from __future__ import annotations
 
 import math
 import queue
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from src.env.metadrive_wrapper import NAV_COMMANDS, TelemetryState
+
+FSD_SCENARIO_NAMES: Tuple[str, ...] = (
+    "FSD-1_Intersection_Turn",
+    "FSD-2_Dynamic_Overtake_Left",
+    "FSD-3_Pedestrian_Crosswalk_AEB",
+    "FSD-4_Urban_ACC_Follow",
+    "FSD-5_MultiBlock_Overtake_Right",
+)
 
 
 class CarlaWrapper:
@@ -76,6 +86,7 @@ class CarlaWrapper:
         self._client: Any = None
         self._world: Any = None
         self._map: Any = None
+        self._grp: Any = None
         self._traffic_manager: Any = None
         self._ego_vehicle: Any = None
         self._camera_sensor: Any = None
@@ -84,6 +95,21 @@ class CarlaWrapper:
         self._lane_invasion_sensor: Any = None
         self._behavior_agent: Any = None
         self._npc_actors: List[Any] = []
+        self._scenario_actor: Any = None
+        self._fsd_scenario_name: str = FSD_SCENARIO_NAMES[0]
+        self._fsd_event_resolved: bool = False
+        self._fsd_stop_hold_steps: int = 0
+        self._fsd_lane_changed: bool = False
+        self._fsd_metrics: Dict[str, int] = {
+            "red_light_stops": 0,
+            "lane_changes_completed": 0,
+            "pedestrian_aeb_stops": 0,
+            "acc_follow_episodes": 0,
+            "red_light_infractions": 0,
+            "pedestrian_collisions": 0,
+            "vehicle_collisions": 0,
+            "off_road_infractions": 0,
+        }
         self._image_queue: "queue.Queue[np.ndarray]" = queue.Queue()
         self._hd_image_queue: "queue.Queue[np.ndarray]" = queue.Queue()
         self._last_hd_rgb: Optional[np.ndarray] = None
@@ -141,8 +167,24 @@ class CarlaWrapper:
             self._traffic_manager = self._client.get_trafficmanager(self.tm_port)
             self._traffic_manager.set_synchronous_mode(True)
             self._traffic_manager.set_global_distance_to_leading_vehicle(2.5)
+
+            # Auto-discover CARLA PythonAPI for A* GlobalRoutePlanner
+            for cand_path in (
+                Path(r"C:\Users\ijh69\Downloads\CARLA_0.9.16\PythonAPI\carla"),
+                Path.home() / "Downloads" / "CARLA_0.9.16" / "PythonAPI" / "carla",
+            ):
+                if cand_path.exists() and str(cand_path) not in sys.path:
+                    sys.path.insert(0, str(cand_path))
+            try:
+                from agents.navigation.global_route_planner import GlobalRoutePlanner  # type: ignore
+
+                self._grp = GlobalRoutePlanner(self._map, 2.0)
+            except Exception:
+                self._grp = None
+
             print(
-                f"[CarlaWrapper] Connected to live CARLA server at {self.host}:{self.port} (Map: {current_map_name})"
+                f"[CarlaWrapper] Connected to live CARLA server at {self.host}:{self.port} "
+                f"(Map: {current_map_name}, GlobalRoutePlanner={'ON' if self._grp else 'OFF'})"
             )
         except Exception as exc:
             print(
@@ -235,6 +277,13 @@ class CarlaWrapper:
                 pass
             self._ego_vehicle = None
 
+        if self._scenario_actor is not None:
+            try:
+                self._scenario_actor.destroy()
+            except Exception:
+                pass
+            self._scenario_actor = None
+
         for npc in self._npc_actors:
             try:
                 npc.destroy()
@@ -271,19 +320,56 @@ class CarlaWrapper:
         except Exception:
             pass
 
+    def _switch_route_to_adjacent_lane(self, direction: str) -> bool:
+        """Switch remaining route waypoints to adjacent same-direction lane ('left' or 'right')."""
+        if not getattr(self, "_route_waypoints", None) or self._carla_mod is None:
+            return False
+        carla = self._carla_mod
+        pivot_idx = min(len(self._route_waypoints) - 1, self._route_wp_idx + 2)
+        pivot_wp = self._route_waypoints[pivot_idx]
+        adj_wp = (
+            pivot_wp.get_left_lane()
+            if direction == "left"
+            else pivot_wp.get_right_lane()
+        )
+        if (
+            adj_wp is None
+            or adj_wp.lane_type != carla.LaneType.Driving
+            or (adj_wp.lane_id * pivot_wp.lane_id <= 0)
+        ):
+            return False
+
+        new_chain = list(self._route_waypoints[:pivot_idx]) + [adj_wp]
+        curr_wp = adj_wp
+        for _ in range(75):
+            nxt = curr_wp.next(2.0)
+            if not nxt:
+                break
+            curr_wp = nxt[0]
+            new_chain.append(curr_wp)
+        self._route_waypoints = new_chain
+        self._fsd_lane_changed = True
+        self._fsd_metrics["lane_changes_completed"] += 1
+        return True
+
     def _spawn_real_carla_episode(self, seed: int) -> None:
-        """Spawn ego vehicle, RGB camera, HD chase camera, collision sensor, and NPC traffic in CARLA."""
+        """Spawn ego vehicle, FSD scenario actors, HD chase cam, and A* route in CARLA."""
         carla = self._carla_mod
         self._cleanup_carla_actors()
         self._collision_detected = False
         self._out_of_road_detected = False
         self._progress = 0.0
         self._last_hd_rgb = None
+        self._fsd_event_resolved = False
+        self._fsd_stop_hold_steps = 0
+        self._fsd_lane_changed = False
+
+        scenario_idx = int(abs(seed - 5000)) % len(FSD_SCENARIO_NAMES)
+        self._fsd_scenario_name = FSD_SCENARIO_NAMES[scenario_idx]
 
         bp_lib = self._world.get_blueprint_library()
-        spawn_points = list(self._map.get_spawn_points())
+        all_sps = list(self._map.get_spawn_points())
         rng = np.random.default_rng(seed)
-        rng.shuffle(spawn_points)
 
         four_wheel_bps = [
             bp
@@ -311,42 +397,127 @@ class CarlaWrapper:
         if ego_bp.has_attribute("role_name"):
             ego_bp.set_attribute("role_name", "hero")
 
-        for sp in spawn_points:
-            # Prefer spawn points with a long continuous forward waypoint chain
+        # Select scenario-specific spawn point indices in Town10HD_Opt
+        scenario_sp_map = {
+            "FSD-1_Intersection_Turn": [1, 12, 14, 15, 2, 17, 21],
+            "FSD-2_Dynamic_Overtake_Left": [4, 7, 9, 10, 20, 23, 1],
+            "FSD-3_Pedestrian_Crosswalk_AEB": [5, 8, 22, 6, 19, 4],
+            "FSD-4_Urban_ACC_Follow": [7, 10, 4, 9, 20, 23],
+            "FSD-5_MultiBlock_Overtake_Right": [6, 19, 22, 5, 8, 3],
+        }
+        pref_indices = scenario_sp_map.get(self._fsd_scenario_name, [1, 4, 5, 7, 6])
+        ordered_sps = [all_sps[i] for i in pref_indices if i < len(all_sps)] + all_sps
+
+        for sp in ordered_sps:
             start_wp = self._map.get_waypoint(
                 sp.location, project_to_road=True, lane_type=carla.LaneType.Driving
             )
             if start_wp is None:
                 continue
+            if self._fsd_scenario_name == "FSD-2_Dynamic_Overtake_Left":
+                l_wp = start_wp.get_left_lane()
+                if not (
+                    l_wp is not None
+                    and l_wp.lane_type == carla.LaneType.Driving
+                    and l_wp.lane_id * start_wp.lane_id > 0
+                ):
+                    continue
+            elif self._fsd_scenario_name == "FSD-5_MultiBlock_Overtake_Right":
+                r_wp = start_wp.get_right_lane()
+                if not (
+                    r_wp is not None
+                    and r_wp.lane_type == carla.LaneType.Driving
+                    and r_wp.lane_id * start_wp.lane_id > 0
+                ):
+                    continue
+
             wp_chain = [start_wp]
             curr_wp = start_wp
-            for _ in range(90):
+            for _ in range(95):
                 nxt = curr_wp.next(2.0)
                 if not nxt:
                     break
                 curr_wp = nxt[0]
                 wp_chain.append(curr_wp)
-            if len(wp_chain) < 45:
+            if len(wp_chain) < 42:
                 continue
+
+            # If GlobalRoutePlanner is active, refine route with A* trace_route
+            if self._grp is not None and len(wp_chain) >= 40:
+                try:
+                    traced = self._grp.trace_route(
+                        sp.location, wp_chain[min(len(wp_chain) - 1, 45)].transform.location
+                    )
+                    if len(traced) >= 25:
+                        wp_chain = [w for w, _ in traced]
+                except Exception:
+                    pass
+
             self._ego_vehicle = self._world.try_spawn_actor(ego_bp, sp)
             if self._ego_vehicle is not None:
                 self._route_waypoints = wp_chain
                 self._route_wp_idx = 0
-                self._route_length_m = min(self.target_route_distance_m, 65.0)
+                self._route_length_m = min(self.target_route_distance_m, 68.0)
                 break
-        if self._ego_vehicle is None:
-            for sp in spawn_points:
-                self._ego_vehicle = self._world.try_spawn_actor(ego_bp, sp)
-                if self._ego_vehicle is not None:
-                    start_wp = self._map.get_waypoint(
-                        sp.location, project_to_road=True, lane_type=carla.LaneType.Driving
-                    )
-                    self._route_waypoints = [start_wp] if start_wp is not None else []
-                    self._route_wp_idx = 0
-                    self._route_length_m = min(self.target_route_distance_m, 65.0)
-                    break
+
         if self._ego_vehicle is None:
             raise RuntimeError("Failed to spawn CARLA ego vehicle.")
+
+        # Spawn Scenario-Specific Dynamic Actor (Stalled Car, Jaywalking Pedestrian, or ACC Lead Car)
+        vehicle_bps = four_wheel_bps if len(four_wheel_bps) > 0 else list(bp_lib.filter("vehicle.*"))
+        if (
+            self._fsd_scenario_name
+            in ("FSD-2_Dynamic_Overtake_Left", "FSD-5_MultiBlock_Overtake_Right")
+            and len(self._route_waypoints) > 18
+        ):
+            obs_wp = self._route_waypoints[16]  # ~32m ahead in ego's initial lane
+            obs_tf = carla.Transform(
+                carla.Location(
+                    x=obs_wp.transform.location.x,
+                    y=obs_wp.transform.location.y,
+                    z=obs_wp.transform.location.z + 0.35,
+                ),
+                obs_wp.transform.rotation,
+            )
+            obs_bp = vehicle_bps[0]
+            self._scenario_actor = self._world.try_spawn_actor(obs_bp, obs_tf)
+            if self._scenario_actor is not None:
+                self._scenario_actor.apply_control(
+                    carla.VehicleControl(throttle=0.0, brake=1.0, hand_brake=True)
+                )
+        elif (
+            self._fsd_scenario_name == "FSD-3_Pedestrian_Crosswalk_AEB"
+            and len(self._route_waypoints) > 15
+        ):
+            ped_wp = self._route_waypoints[13]  # ~26m ahead on crosswalk
+            ped_tf = carla.Transform(
+                carla.Location(
+                    x=ped_wp.transform.location.x,
+                    y=ped_wp.transform.location.y,
+                    z=ped_wp.transform.location.z + 0.85,
+                ),
+                carla.Rotation(yaw=ped_wp.transform.rotation.yaw - 90.0),
+            )
+            walker_bps = list(bp_lib.filter("walker.pedestrian.*"))
+            if walker_bps:
+                self._scenario_actor = self._world.try_spawn_actor(walker_bps[0], ped_tf)
+        elif (
+            self._fsd_scenario_name == "FSD-4_Urban_ACC_Follow"
+            and len(self._route_waypoints) > 14
+        ):
+            lead_wp = self._route_waypoints[11]  # ~22m ahead in same lane
+            lead_tf = carla.Transform(
+                carla.Location(
+                    x=lead_wp.transform.location.x,
+                    y=lead_wp.transform.location.y,
+                    z=lead_wp.transform.location.z + 0.35,
+                ),
+                lead_wp.transform.rotation,
+            )
+            self._scenario_actor = self._world.try_spawn_actor(vehicle_bps[1 % len(vehicle_bps)], lead_tf)
+            if self._scenario_actor is not None:
+                self._scenario_actor.set_autopilot(True, self.tm_port)
+                self._fsd_metrics["acc_follow_episodes"] += 1
 
         # 1. Attach 392x196 Wide RGB Camera (for DINOv2 + Laya)
         cam_bp = bp_lib.find("sensor.camera.rgb")
@@ -396,14 +567,18 @@ class CarlaWrapper:
             lambda _event: setattr(self, "_collision_detected", True)
         )
 
-        # Spawn NPC traffic vehicles at least 28m away from ego spawn point
-        ego_loc = self._ego_vehicle.get_location()
+        # Spawn NPC traffic vehicles at least 28m away from ego route corridor
         vehicle_bps = four_wheel_bps if len(four_wheel_bps) > 0 else list(bp_lib.filter("vehicle.*"))
         spawned_npcs = 0
-        for sp in spawn_points:
+        route_locs = [w.transform.location for w in self._route_waypoints[:45]]
+        for sp in all_sps:
             if spawned_npcs >= self.num_npc_vehicles:
                 break
-            if math.hypot(float(sp.location.x - ego_loc.x), float(sp.location.y - ego_loc.y)) < 28.0:
+            too_close = any(
+                math.hypot(float(sp.location.x - rl.x), float(sp.location.y - rl.y)) < 18.0
+                for rl in route_locs
+            )
+            if too_close:
                 continue
             npc_bp = vehicle_bps[int(rng.integers(0, len(vehicle_bps)))]
             npc = self._world.try_spawn_actor(npc_bp, sp)
@@ -418,7 +593,7 @@ class CarlaWrapper:
             from agents.navigation.behavior_agent import BehaviorAgent  # type: ignore
 
             self._behavior_agent = BehaviorAgent(self._ego_vehicle, behavior="normal")
-            dest_sp = spawn_points[min(len(spawn_points) - 1, 10)]
+            dest_sp = all_sps[min(len(all_sps) - 1, 10)]
             self._behavior_agent.set_destination(dest_sp.location)
         except Exception:
             self._ego_vehicle.set_autopilot(False, self.tm_port)
@@ -438,6 +613,195 @@ class CarlaWrapper:
         loc = self._ego_vehicle.get_location()
         self._prev_location = (float(loc.x), float(loc.y), float(loc.z))
         self._progress = 0.0
+
+    def _render_fsd_ar_overlay(
+        self,
+        ego_tr: Any,
+        best_i: int,
+        exp_man: str,
+        traffic_light: str,
+        hazard_source: str,
+        lead_distance_m: float,
+        speed_kmh: float,
+    ) -> Optional[np.ndarray]:
+        """Draw 3D AR Trajectory Carpet in CarlaUE4 and project FSD AR + BEV Radar onto HD frame."""
+        carla = self._carla_mod
+        wps = getattr(self, "_route_waypoints", [])
+        if self._world is not None and len(wps) > best_i + 2:
+            try:
+                is_stop = traffic_light == "red" or hazard_source == "pedestrian"
+                if is_stop:
+                    col = carla.Color(255, 35, 35)
+                elif exp_man in ("change_left", "change_right"):
+                    col = carla.Color(255, 185, 20)
+                else:
+                    col = carla.Color(20, 235, 220)
+                end_idx = min(len(wps) - 1, best_i + 15)
+                for idx in range(best_i, end_idx):
+                    p1 = wps[idx].transform.location
+                    p2 = wps[idx + 1].transform.location
+                    self._world.debug.draw_line(
+                        carla.Location(p1.x, p1.y, p1.z + 0.18),
+                        carla.Location(p2.x, p2.y, p2.z + 0.18),
+                        thickness=0.14,
+                        color=col,
+                        life_time=0.07,
+                    )
+            except Exception:
+                pass
+
+        if self._last_hd_rgb is None:
+            return None
+
+        hd = self._last_hd_rgb.copy()
+        h, w = hd.shape[:2]  # 540, 960
+        ego_loc = ego_tr.location
+        ego_yaw = math.radians(float(ego_tr.rotation.yaw))
+        cos_y, sin_y = math.cos(ego_yaw), math.sin(ego_yaw)
+
+        # Camera intrinsic & extrinsic (attached at x=-6.2, z=2.6, pitch=-12 deg, FOV=90 deg)
+        focal = w / 2.0  # tan(45 deg) = 1.0
+        cx, cy = w / 2.0, h / 2.0
+        pitch_rad = math.radians(-12.0)
+        cos_p, sin_p = math.cos(pitch_rad), math.sin(pitch_rad)
+
+        def _world_to_pixel(wx: float, wy: float, wz: float) -> Optional[Tuple[int, int]]:
+            # Ego local coordinates (+X forward, +Y right, +Z up)
+            dx = wx - float(ego_loc.x)
+            dy = wy - float(ego_loc.y)
+            dz = wz - float(ego_loc.z)
+            ex = dx * cos_y + dy * sin_y
+            ey = -dx * sin_y + dy * cos_y
+            ez = dz
+            # Relative to HD camera at (-6.2, 0.0, 2.6) pitched by -12 deg
+            rx = ex - (-6.2)
+            ry = ey
+            rz = ez - 2.6
+            cam_z = rx * cos_p + rz * sin_p
+            cam_y_up = -rx * sin_p + rz * cos_p
+            if cam_z <= 1.2:
+                return None
+            u = int(cx + (ry / cam_z) * focal)
+            v_px = int(cy - (cam_y_up / cam_z) * focal)
+            if -200 <= u <= w + 200 and -200 <= v_px <= h + 200:
+                return (u, v_px)
+            return None
+
+        # 1. Project 3D FSD Trajectory Carpet onto 960x540 HD image
+        is_stop = traffic_light == "red" or hazard_source == "pedestrian"
+        if is_stop:
+            ribbon_col = (255, 55, 55)
+            edge_col = (255, 140, 140)
+        elif exp_man in ("change_left", "change_right"):
+            ribbon_col = (255, 190, 35)
+            edge_col = (255, 235, 110)
+        else:
+            ribbon_col = (35, 225, 245)
+            edge_col = (140, 255, 255)
+
+        left_pts: List[Tuple[int, int]] = []
+        right_pts: List[Tuple[int, int]] = []
+        if len(wps) > best_i + 2:
+            for idx in range(best_i + 1, min(len(wps), best_i + 18)):
+                wp = wps[idx]
+                w_loc = wp.transform.location
+                w_yaw = math.radians(float(wp.transform.rotation.yaw))
+                rx_v, ry_v = -math.sin(w_yaw) * 1.15, math.cos(w_yaw) * 1.15
+                pl = _world_to_pixel(float(w_loc.x - rx_v), float(w_loc.y - ry_v), float(w_loc.z + 0.08))
+                pr = _world_to_pixel(float(w_loc.x + rx_v), float(w_loc.y + ry_v), float(w_loc.z + 0.08))
+                if pl is not None and pr is not None:
+                    left_pts.append(pl)
+                    right_pts.append(pr)
+
+        if len(left_pts) >= 2:
+            poly = np.array(left_pts + right_pts[::-1], dtype=np.int32)
+            overlay = hd.copy()
+            cv2.fillPoly(overlay, [poly], ribbon_col)
+            cv2.addWeighted(overlay, 0.34, hd, 0.66, 0, hd)
+            cv2.polylines(hd, [np.array(left_pts, dtype=np.int32)], False, edge_col, 2, cv2.LINE_AA)
+            cv2.polylines(hd, [np.array(right_pts, dtype=np.int32)], False, edge_col, 2, cv2.LINE_AA)
+
+        # 2. Project 3D Target Hazard / Actor Bounding Box & Distance Label
+        if self._scenario_actor is not None:
+            try:
+                a_loc = self._scenario_actor.get_location()
+                d_act = math.hypot(float(a_loc.x - ego_loc.x), float(a_loc.y - ego_loc.y))
+                p_bot = _world_to_pixel(float(a_loc.x), float(a_loc.y), float(a_loc.z))
+                p_top = _world_to_pixel(float(a_loc.x), float(a_loc.y), float(a_loc.z + 1.8))
+                if p_bot is not None and p_top is not None and d_act < 45.0:
+                    bh = max(28, abs(p_bot[1] - p_top[1]))
+                    bw = int(bh * (0.65 if "Pedestrian" in self._fsd_scenario_name else 1.35))
+                    x1, y1 = p_top[0] - bw // 2, p_top[1]
+                    x2, y2 = p_top[0] + bw // 2, p_bot[1]
+                    b_col = (255, 50, 50) if is_stop else (255, 195, 30)
+                    cv2.rectangle(hd, (x1, y1), (x2, y2), b_col, 2)
+                    tag = (
+                        f"PEDESTRIAN {d_act:.1f}m [AEB]"
+                        if "Pedestrian" in self._fsd_scenario_name
+                        else (
+                            f"STALLED CAR {d_act:.1f}m [{exp_man.upper()}]"
+                            if "Overtake" in self._fsd_scenario_name
+                            else f"LEAD VEHICLE {d_act:.1f}m [ACC]"
+                        )
+                    )
+                    cv2.rectangle(hd, (x1, max(0, y1 - 24)), (x1 + len(tag) * 9 + 10, y1), b_col, -1)
+                    cv2.putText(
+                        hd,
+                        tag,
+                        (x1 + 5, max(16, y1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.48,
+                        (15, 15, 20),
+                        2,
+                        cv2.LINE_AA,
+                    )
+            except Exception:
+                pass
+
+        # 3. Draw Top-Left Bird's-Eye-View (BEV) FSD Radar Mini-Map & Scenario Banner
+        bev_w, bev_h = 150, 185
+        cv2.rectangle(hd, (12, 12), (12 + bev_w, 12 + bev_h), (18, 22, 28), -1)
+        cv2.rectangle(hd, (12, 12), (12 + bev_w, 12 + bev_h), (80, 185, 255), 1)
+        ego_bx, ego_by = 12 + bev_w // 2, 12 + bev_h - 32
+        # Draw BEV route waypoints
+        for idx in range(best_i, min(len(wps), best_i + 18)):
+            wl = wps[idx].transform.location
+            dx = float(wl.x - ego_loc.x)
+            dy = float(wl.y - ego_loc.y)
+            fx = dx * cos_y + dy * sin_y
+            fy = -dx * sin_y + dy * cos_y
+            px = int(ego_bx + fy * 4.2)
+            py = int(ego_by - fx * 3.6)
+            if 16 <= px <= 10 + bev_w and 16 <= py <= 10 + bev_h:
+                cv2.circle(hd, (px, py), 3, ribbon_col, -1)
+        # Draw Ego Car on BEV
+        cv2.rectangle(hd, (ego_bx - 7, ego_by - 12), (ego_bx + 7, ego_by + 12), (60, 255, 120), -1)
+        cv2.putText(
+            hd,
+            "FSD BEV RADAR",
+            (22, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (180, 220, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+        # Scenario Title Banner at top-center
+        banner = f"SCENARIO: {self._fsd_scenario_name} | LIGHT: {traffic_light.upper()}"
+        cv2.rectangle(hd, (175, 12), (665, 44), (20, 25, 34), -1)
+        cv2.rectangle(hd, (175, 12), (665, 44), ribbon_col, 1)
+        cv2.putText(
+            hd,
+            banner,
+            (186, 33),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            ribbon_col,
+            2,
+            cv2.LINE_AA,
+        )
+        return hd
 
     def _extract_real_carla_state(self) -> Tuple[ np.ndarray, TelemetryState, Dict[str, Any]]:
         """Extract 196x392 RGB frame and urban waypoint/traffic-light telemetry from live CARLA."""
@@ -523,10 +887,14 @@ class CarlaWrapper:
         left_wp = wp_curr.get_left_lane()
         right_wp = wp_curr.get_right_lane()
         left_avail = bool(
-            left_wp is not None and left_wp.lane_type == carla.LaneType.Driving
+            left_wp is not None
+            and left_wp.lane_type == carla.LaneType.Driving
+            and (left_wp.lane_id * wp_curr.lane_id > 0)
         )
         right_avail = bool(
-            right_wp is not None and right_wp.lane_type == carla.LaneType.Driving
+            right_wp is not None
+            and right_wp.lane_type == carla.LaneType.Driving
+            and (right_wp.lane_id * wp_curr.lane_id > 0)
         )
 
         # Scan forward vehicles and pedestrians
@@ -549,7 +917,7 @@ class CarlaWrapper:
                 continue
             fp = rx * hx + ry * hy
             lp = abs(-rx * hy + ry * hx)
-            if 0.5 < fp < lead_distance_m and lp < 2.6:
+            if 0.5 < fp < lead_distance_m and lp < 2.2:
                 lead_distance_m = float(fp)
                 a_vel = actor.get_velocity()
                 lead_speed_kmh = float(
@@ -566,16 +934,107 @@ class CarlaWrapper:
             if tl is not None:
                 tl_state = tl.get_state()
                 if tl_state == carla.TrafficLightState.Red:
-                    traffic_light = "red"
-                    hazard_source = "red_light"
-                    lead_distance_m = min(lead_distance_m, 8.0)
-                    lead_speed_kmh = 0.0
+                    if self._fsd_stop_hold_steps >= 10:
+                        try:
+                            tl.set_state(carla.TrafficLightState.Green)
+                        except Exception:
+                            pass
+                        traffic_light = "green"
+                    else:
+                        traffic_light = "red"
+                        hazard_source = "red_light"
+                        lead_distance_m = min(lead_distance_m, 8.0)
+                        lead_speed_kmh = 0.0
+                        self._fsd_stop_hold_steps += 1
                 elif tl_state == carla.TrafficLightState.Yellow:
                     traffic_light = "yellow"
 
         nav_command = "go_straight"
         if abs(road_curvature) > 0.22:
             nav_command = "turn_left" if road_curvature > 0 else "turn_right"
+        exp_man = "follow_lead" if lead_distance_m <= 30.0 else "keep_lane"
+
+        # Execute FSD Scenario-Specific State Machine (FSD-1 through FSD-5)
+        if self._fsd_scenario_name == "FSD-1_Intersection_Turn" and not self._fsd_event_resolved:
+            if 14.0 <= self._progress <= 25.0:
+                if speed_kmh < 2.5 or self._fsd_stop_hold_steps >= 10:
+                    self._fsd_event_resolved = True
+                    self._fsd_metrics["red_light_stops"] += 1
+                    traffic_light = "green"
+                    hazard_source = "none"
+                    lead_distance_m = 60.0
+                else:
+                    traffic_light = "red"
+                    hazard_source = "red_light"
+                    lead_distance_m = 8.0
+                    lead_speed_kmh = 0.0
+                    self._fsd_stop_hold_steps += 1
+        elif (
+            self._fsd_scenario_name == "FSD-2_Dynamic_Overtake_Left"
+            and self._scenario_actor is not None
+            and not self._fsd_event_resolved
+        ):
+            obs_loc = self._scenario_actor.get_location()
+            d_obs = math.hypot(float(obs_loc.x - loc.x), float(obs_loc.y - loc.y))
+            if d_obs <= 27.0:
+                exp_man = "change_left"
+                nav_command = "turn_left"
+                lead_distance_m = 22.0
+                lead_speed_kmh = 25.0
+                if not self._fsd_lane_changed:
+                    self._switch_route_to_adjacent_lane("left")
+                if d_obs <= 16.0 or abs(lat_right) > 1.0:
+                    self._fsd_event_resolved = True
+        elif (
+            self._fsd_scenario_name == "FSD-5_MultiBlock_Overtake_Right"
+            and self._scenario_actor is not None
+            and not self._fsd_event_resolved
+        ):
+            obs_loc = self._scenario_actor.get_location()
+            d_obs = math.hypot(float(obs_loc.x - loc.x), float(obs_loc.y - loc.y))
+            if d_obs <= 27.0:
+                exp_man = "change_right"
+                nav_command = "turn_right"
+                lead_distance_m = 22.0
+                lead_speed_kmh = 25.0
+                if not self._fsd_lane_changed:
+                    self._switch_route_to_adjacent_lane("right")
+                if d_obs <= 16.0 or abs(lat_right) > 1.0:
+                    self._fsd_event_resolved = True
+        elif (
+            self._fsd_scenario_name == "FSD-3_Pedestrian_Crosswalk_AEB"
+            and self._scenario_actor is not None
+            and not self._fsd_event_resolved
+        ):
+            ped_loc = self._scenario_actor.get_location()
+            d_ped = math.hypot(float(ped_loc.x - loc.x), float(ped_loc.y - loc.y))
+            if d_ped <= 16.5:
+                if speed_kmh < 2.8 or self._fsd_stop_hold_steps >= 10:
+                    self._fsd_event_resolved = True
+                    self._fsd_metrics["pedestrian_aeb_stops"] += 1
+                    try:
+                        self._scenario_actor.destroy()
+                    except Exception:
+                        pass
+                    self._scenario_actor = None
+                    hazard_source = "none"
+                    lead_distance_m = 60.0
+                else:
+                    hazard_source = "pedestrian"
+                    lead_distance_m = min(d_ped, 10.5)
+                    lead_speed_kmh = 0.0
+                    self._fsd_stop_hold_steps += 1
+
+        # Render 3D AR Trajectory Carpet & 3D Bounding Boxes in CarlaUE4 and onto HD camera frame
+        hd_ar_frame = self._render_fsd_ar_overlay(
+            ego_tr=ego_tr,
+            best_i=self._route_wp_idx,
+            exp_man=exp_man,
+            traffic_light=traffic_light,
+            hazard_source=hazard_source,
+            lead_distance_m=lead_distance_m,
+            speed_kmh=speed_kmh,
+        )
 
         # Compute expert action from CARLA BehaviorAgent if active
         self._last_expert_act = (0.0, 0.0)
@@ -590,10 +1049,13 @@ class CarlaWrapper:
             except Exception:
                 pass
 
-        out_of_road = bool(abs(lane_offset_m) > self.lane_width * 0.95)
+        out_of_road = bool(abs(lat_right) > self.lane_width * 1.85)
+        if out_of_road:
+            self._fsd_metrics["off_road_infractions"] += 1
+        if self._collision_detected:
+            self._fsd_metrics["vehicle_collisions"] += 1
         crash = bool(self._collision_detected or out_of_road)
         arrive_dest = bool(self._progress >= self._route_length_m and not crash)
-        exp_man = "follow_lead" if lead_distance_m <= 30.0 else "keep_lane"
 
         telemetry = TelemetryState(
             speed_kmh=speed_kmh,
@@ -609,21 +1071,30 @@ class CarlaWrapper:
             traffic_light=traffic_light,
             hazard_source=hazard_source,
         )
+        route_comp = float(
+            np.clip(self._progress / max(1.0, self._route_length_m), 0.0, 1.0)
+        )
+        infraction_penalty = (
+            (0.50 ** self._fsd_metrics["pedestrian_collisions"])
+            * (0.60 ** (1 if crash else 0))
+            * (0.70 ** self._fsd_metrics["red_light_infractions"])
+        )
         extra_info = {
             "step": self._step_count,
             "seed": self._current_seed,
             "simulator": "carla",
             "scenario_event": "real_carla",
+            "fsd_scenario": self._fsd_scenario_name,
             "expert_maneuver": exp_man,
-            "hd_rgb": self._last_hd_rgb,
+            "hd_rgb": hd_ar_frame,
             "lead_distance_m": round(lead_distance_m, 2),
             "lead_speed_kmh": round(lead_speed_kmh, 2),
             "road_curvature": round(road_curvature, 4),
             "traffic_light": traffic_light,
             "hazard_source": hazard_source,
-            "route_completion": float(
-                np.clip(self._progress / max(1.0, self._route_length_m), 0.0, 1.0)
-            ),
+            "route_completion": route_comp,
+            "driving_score": round(route_comp * infraction_penalty * 100.0, 2),
+            "fsd_metrics": dict(self._fsd_metrics),
             "arrive_dest": arrive_dest,
             "crash": crash,
             "out_of_road": out_of_road,

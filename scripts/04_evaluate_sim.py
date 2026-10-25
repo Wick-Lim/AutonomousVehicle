@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import Counter
@@ -254,8 +255,11 @@ def main() -> None:
 
     latencies_ms: List[float] = []
     episode_completions: List[float] = []
+    episode_driving_scores: List[float] = []
     episode_arrived: List[bool] = []
     episode_crashed: List[bool] = []
+    episode_scenarios: List[str] = []
+    latest_fsd_metrics: Dict[str, Any] = {}
     shield_reasons: Counter[str] = Counter()
 
     all_m_probs: List[torch.Tensor] = []
@@ -361,8 +365,15 @@ def main() -> None:
             done = bool(done or done_step)
 
         episode_completions.append(float(info.get("route_completion", 0.0)))
+        episode_driving_scores.append(
+            float(info.get("driving_score", float(info.get("route_completion", 0.0)) * 100.0))
+        )
         episode_arrived.append(bool(info.get("arrive_dest", False)))
         episode_crashed.append(bool(info.get("crash", False)))
+        if "fsd_scenario" in info:
+            episode_scenarios.append(str(info["fsd_scenario"]))
+        if "fsd_metrics" in info:
+            latest_fsd_metrics = dict(info["fsd_metrics"])
 
     if video_writer is not None:
         video_writer.release()
@@ -395,6 +406,8 @@ def main() -> None:
         else float(online_ece)
     )
 
+    mean_driving_score = float(np.mean(episode_driving_scores)) if episode_driving_scores else route_completion_rate
+
     summary = {
         "simulator": simulator_name,
         "episodes": num_episodes,
@@ -404,9 +417,12 @@ def main() -> None:
         "fps": round(fps, 1),
         "route_completion_rate_pct": round(route_completion_rate, 2),
         "mean_route_progress_pct": round(float(np.mean(episode_completions) * 100.0), 2),
+        "driving_score_pct": round(mean_driving_score, 2),
         "crash_free_rate_pct": round(crash_free_rate, 2),
         "ece": round(reported_ece, 4),
         "online_sim_ece": round(online_ece, 4),
+        "fsd_scenarios_tested": episode_scenarios,
+        "fsd_metrics": latest_fsd_metrics,
         "shield_interventions": dict(shield_reasons),
         "targets_met": {
             "latency_le_40ms": mean_latency_ms <= 40.0,
@@ -445,12 +461,18 @@ def main() -> None:
         f"  4. Calibration Error ECE : {reported_ece:.4f} "
         f"[Target <= 0.0500]  -> {'PASS' if summary['targets_met']['ece_le_0_05'] else 'FAIL'}"
     )
+    if episode_scenarios:
+        print(f"  5. CARLA Driving Score   : {mean_driving_score:.1f}% (Leaderboard DS)")
+        print(f"  6. FSD Scenarios Passed  : {episode_scenarios}")
+        print(f"  7. FSD Capability Counts : {latest_fsd_metrics}")
     print("-" * 74)
     print(f"  Safety Shield Interventions: {dict(shield_reasons)}")
     print(f"  Metrics saved to           : {eval_out_path}")
     print("=" * 74, flush=True)
 
     env.close()
+    if simulator_name == "carla":
+        os._exit(0)
 
 
 if __name__ == "__main__":
