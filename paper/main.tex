@@ -38,14 +38,15 @@ Autoregressive vision-language-action (VLA) models \cite{brohan2023rt2,kim2024op
 \section{Introduction and Problem Formulation}
 Autoregressive decoders evaluate $P(y_{1:K} \mid I_t, \mathcal{T}_t) = \prod_{k=1}^{K} P(y_k \mid y_{<k}, I_t, \mathcal{T}_t)$ over $K \approx 15$ serial steps \cite{brohan2023rt2,kim2024openvla,liu2023visual}, whereas planning-oriented and sensor-fusion stacks \cite{hu2023planning,jiang2023vad,li2022bevformer,codevilla2018end,chen2020learning,prakash2021multi,chitta2022transfuser,jaeger2023hidden} require $\Delta t \le 50$\,ms. In our formulation, control at step $t$ requires three discrete outputs read in a single bidirectional pass \cite{devlin2019bert,warner2024modernbert,laya2024nonautoregressive}:
 \begin{align}
-    m_t &\in \{\texttt{keep\_lane}, \texttt{change\_left}, \texttt{change\_right}, \texttt{follow\_lead}\}, \\
+    m_t &\in \{\texttt{keep\_lane}, \texttt{change\_left}, \nonumber\\
+        &\quad\; \texttt{change\_right}, \texttt{follow\_lead}\}, \\
     s_t &\in \{0, 1, 2, 3\} \mapsto \{0, 20, 35, 50\}\,\text{km/h}, \\
     p_{\text{AEB}} &\in [0, 1].
 \end{align}
 
 \begin{figure*}[t]
     \centering
-    \includegraphics[width=0.98\textwidth]{figures/fig1_carla_fsd_scenarios.png}
+    \includegraphics[width=0.96\textwidth]{figures/fig1_carla_fsd_scenarios.png}
     \caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}, 20\,Hz synchronous) closed-loop scenarios: (a) \texttt{FSD-1} intersection red-light stop, (b) \texttt{FSD-2} 28\,m quintic S-curve left overtake, (c) \texttt{FSD-3} crosswalk pedestrian AEB, (d) \texttt{FSD-4} 24\,km/h ACC follow at 16\,m gap, (e) \texttt{FSD-5} right-lane overtake.}
     \label{fig:carla_scenarios}
 \end{figure*}
@@ -57,22 +58,22 @@ Camera frames are cropped ($\texttt{crop\_top}=0.25$, $\texttt{crop\_bottom}=0.1
     G = \text{AdaptiveAvgPool2d}_{(4,9)}(\tilde{F}) \in \mathbb{R}^{B \times 768 \times 4 \times 9},
 \end{equation}
 \begin{equation}
-    V_{\text{spatial}} = \text{LN}\big(W_2\,\text{GELU}(\text{LN}(W_1(\text{Flatten}(G) + E_{\text{pos}}) + b_1)) + b_2\big).
+    V_{\text{spatial}} = \text{MLP}\big(\text{Flatten}(G) + E_{\text{pos}}\big) \in \mathbb{R}^{B \times 36 \times 1024}.
 \end{equation}
-\begin{footnotesize}
+\begin{scriptsize}
 \begin{verbatim}
 # src/models/spatial_projector.py
-grid = feat_2d.permute(0, 3, 1, 2) # (B, 768, 14, 28)
-pooled = self.pool(grid).flatten(2).transpose(1, 2) # (B,36,768)
-tokens = self.mlp(pooled + self.pos_embed) # (B, 36, 1024)
+grid = feat_2d.permute(0, 3, 1, 2)
+pooled = self.pool(grid).flatten(2).transpose(1, 2)
+tokens = self.mlp(pooled + self.pos_embed)
 \end{verbatim}
-\end{footnotesize}
+\end{scriptsize}
 Multimodal sequence $Z = [e_{\text{[CLS]}}; V_{\text{spatial}}; E_{\text{telemetry}}; e_{\text{choice}}; e_{\text{score}}; e_{\text{noul}}]$ is evaluated in one forward pass $H = f_{\text{Laya}}(Z)$ \cite{laya2024nonautoregressive,warner2024modernbert}:
-\begin{equation}
-    z^{(m)} = W_m H_{:, \text{idx}_{\text{choice}}}, \quad
-    z^{(s)} = W_s H_{:, \text{idx}_{\text{score}}}, \quad
-    z^{(b)} = W_b H_{:, \text{idx}_{\text{noul}}}.
-\end{equation}
+\begin{align}
+    z^{(m)} &= W_m H_{:, \text{idx}_{\text{choice}}}, \quad
+    z^{(s)} = W_s H_{:, \text{idx}_{\text{score}}}, \nonumber\\
+    z^{(b)} &= W_b H_{:, \text{idx}_{\text{noul}}}.
+\end{align}
 
 \begin{table}[t]
 \centering
@@ -97,7 +98,7 @@ Kinematics & Quintic $N_b$, ACC $(d^*, k_g)$ & 14 WPs ($28$\,m), $(16.0\,\text{m
 
 \begin{figure*}[t]
     \centering
-    \includegraphics[width=0.94\textwidth]{figures/fig2_control_kinematics.png}
+    \includegraphics[width=0.92\textwidth]{figures/fig2_control_kinematics.png}
     \caption{Control kinematics: (a) 28\,m quintic S-curve $s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5$ vs.\ $3.5$\,m step switch; (b) constant-time-headway ACC velocity convergence ($v_{\text{ego}} \to 24.0$\,km/h at $d^* = 16.0$\,m).}
     \label{fig:kinematics}
 \end{figure*}
@@ -107,11 +108,11 @@ Kinematics & Quintic $N_b$, ACC $(d^*, k_g)$ & 14 WPs ($28$\,m), $(16.0\,\text{m
 Temperature scaling \cite{guo2017calibration} calibrates probabilities $\hat{p}^{(m)} = \text{Softmax}(z^{(m)}/T_m)$ and $\hat{p}_{\text{AEB}} = \sigma((z^{(b)}_1 - z^{(b)}_0)/T_b)$. Rule~1 forces $u_{\text{tb}} = -1.0$ when $\hat{p}_{\text{AEB}} \ge 0.70$, $\texttt{traffic\_light}=\texttt{red}$, or pedestrian distance $d \le 16.0$\,m. Rule~2 reverts lane changes to \texttt{keep\_lane} if $\max_c \hat{p}^{(m)}_c < 0.80$ or if OpenDRIVE same-direction lane check $\texttt{adj\_wp.lane\_id} \times \texttt{wp.lane\_id} > 0$ fails \cite{dupuis2010opendrive}.
 
 For lane transitions over $N_b = 14$ waypoints ($28.0$\,m, $\tau_k = k/(N_b - 1)$), 3D coordinates are blended via minimum-jerk quintic polynomial \cite{flash1985coordination,werling2010optimal}:
-\begin{equation}
-    s(\tau) = 10\tau^3 - 15\tau^4 + 6\tau^5, \quad
-    P^{\text{blend}}_k = \big(1 - s(\tau_k)\big) P^{\text{orig}}_k + s(\tau_k) P^{\text{adj}}_k.
-\end{equation}
-\begin{footnotesize}
+\begin{align}
+    s(\tau) &= 10\tau^3 - 15\tau^4 + 6\tau^5, \\
+    P^{\text{blend}}_k &= \big(1 - s(\tau_k)\big) P^{\text{orig}}_k + s(\tau_k) P^{\text{adj}}_k.
+\end{align}
+\begin{scriptsize}
 \begin{verbatim}
 # src/env/carla_wrapper.py (_switch_route_to_adjacent_lane)
 for k in range(len(adj_chain)):
@@ -121,27 +122,29 @@ for k in range(len(adj_chain)):
         bx = (1.0 - s) * float(ol.x) + s * float(al.x)
         by = (1.0 - s) * float(ol.y) + s * float(al.y)
 \end{verbatim}
-\end{footnotesize}
+\end{scriptsize}
 Continuous segment projection onto $\overline{P_i P_{i+1}}$ gives foot point $P_{\text{proj}}$ and arc-length lookahead $P_{\text{look}}$ at $L_{\text{look}} = \text{clip}(7.5 + 0.18 v_{\text{kmh}}, 7.5, 13.5)$\,m \cite{thrun2006stanley,hoffmann2007autonomous,coulter1992implementation,paden2016survey}. Defining chord angle $\psi_{\text{ref}} = \text{atan2}(y_{\text{look}} - y_{\text{proj}}, x_{\text{look}} - x_{\text{proj}})$ decouples cross-track offset $e_y$ and heading error $e_\psi$:
 \begin{align}
-    e_y &= -\big((x - x_{\text{proj}})(-\sin\psi_{\text{proj}}) + (y - y_{\text{proj}})\cos\psi_{\text{proj}}\big), \\
+    e_y &= (x - x_{\text{proj}})\sin\psi_{\text{proj}} - (y - y_{\text{proj}})\cos\psi_{\text{proj}}, \\
     e_\psi &= -\text{atan2}\big(\sin(\psi_{\text{ego}} - \psi_{\text{ref}}), \cos(\psi_{\text{ego}} - \psi_{\text{ref}})\big), \\
-    \delta_t &= \delta_{t-1} + \text{clip}\!\left(\alpha(\delta_{\text{PID}} - \delta_{t-1}), -\frac{1.1\Delta t}{1 + 0.012 v_{\text{kmh}}}, \frac{1.1\Delta t}{1 + 0.012 v_{\text{kmh}}}\right).
+    \Delta \delta_{\max} &= \frac{1.1\Delta t}{1 + 0.012 v_{\text{kmh}}}, \\
+    \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{PID}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big).
 \end{align}
 Longitudinal ACC velocity synchronization ($d_{\text{lead}} < 38$\,m, $v_{\text{lead}} \ge 8$\,km/h) \cite{ioannou1993autonomous,rajamani2001experimental,treiber2000congested} follows:
-\begin{equation}
-    v_{\text{ACC}} = \text{clip}\!\big(v_{\text{lead}} + 0.85(d_{\text{lead}} - 16.0),\, 0,\, \min(35.0, v_{\text{lead}} + 6.0)\big).
-\end{equation}
-\begin{footnotesize}
+\begin{align}
+    v_{\text{raw}} &= v_{\text{lead}} + 0.85(d_{\text{lead}} - 16.0), \\
+    v_{\text{ACC}} &= \text{clip}\!\big(v_{\text{raw}},\, 0,\, \min(35.0, v_{\text{lead}} + 6.0)\big).
+\end{align}
+\begin{scriptsize}
 \begin{verbatim}
 # src/control/shield_pid.py (apply_safety_shield)
 desired_gap_m = 16.0
 gap_error_m = lead_distance_m - desired_gap_m
+v_cap = max(target_speed_kmh, min(35.0, lead_speed_kmh + 6.0))
 acc_sync_speed = float(np.clip(
-    lead_speed_kmh + 0.85 * gap_error_m, 0.0,
-    max(target_speed_kmh, min(35.0, lead_speed_kmh + 6.0))))
+    lead_speed_kmh + 0.85 * gap_error_m, 0.0, v_cap))
 \end{verbatim}
-\end{footnotesize}
+\end{scriptsize}
 
 \begin{table}[t]
 \centering
@@ -166,6 +169,7 @@ Scenario & Event & Dist (m) & Infractions & RC / DS \\
 \centering
 \caption{Closed-loop evaluation summary (\texttt{checkpoints/eval\_metrics\_carla.json} and \texttt{eval\_metrics.json}).}
 \label{tab:main_results}
+\resizebox{0.96\textwidth}{!}{%
 \begin{tabular}{llccc}
 \toprule
 Simulator & Metric & Target KPI & Measured Result & Status \\
@@ -183,7 +187,8 @@ Simulator & Metric & Target KPI & Measured Result & Status \\
  & Crash-Free Rate & $\ge 95.0\%$ & 100.0\% & PASS \\
  & Expected Calibration Error (ECE) & $\le 0.0500$ & 0.0000 & PASS \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
 
 \begin{table}[t]
@@ -206,17 +211,17 @@ Discrete 2\,m WPs + Step Switch & 71 & $0.250$ & $100.0\%$ \\
 \section{Experiments and Conclusion}
 \label{sec:exp}
 Closed-loop benchmarks were executed in MetaDrive 0.4.3 \cite{li2022metadrive} ($4,153$ frames) and live CARLA 0.9.16 \cite{dosovitskiy2017carla} (\texttt{Town10HD\_Opt}, $20$\,Hz synchronous mode with A* \texttt{GlobalRoutePlanner} \cite{hart1968formal}, $889$ frames in \texttt{driving\_demo\_carla\_smooth.mp4}). Recorded output JSON (\texttt{checkpoints/eval\_metrics\_carla.json}):
-\begin{footnotesize}
+\begin{scriptsize}
 \begin{verbatim}
 {"simulator": "carla", "num_episodes": 5, "total_frames": 889,
- "mean_latency_ms": 31.67, "p95_latency_ms": 32.89, "fps": 31.6,
- "route_completion_rate": 1.0, "crash_free_rate": 1.0,
- "carla_driving_score": 100.0, "calibrated_ece": 0.0,
- "fsd_capability_counts": {"red_light_stops": 1,
-   "lane_changes_completed": 2, "pedestrian_aeb_stops": 1,
-   "acc_follow_episodes": 1, "vehicle_collisions": 0}}
+ "mean_latency_ms": 31.67, "p95_latency_ms": 32.89,
+ "fps": 31.6, "route_completion_rate": 1.0,
+ "crash_free_rate": 1.0, "carla_driving_score": 100.0,
+ "calibrated_ece": 0.0, "fsd_capability_counts": {
+   "red_light_stops": 1, "lane_changes_completed": 2,
+   "pedestrian_aeb_stops": 1, "acc_follow_episodes": 1}}
 \end{verbatim}
-\end{footnotesize}
+\end{scriptsize}
 Tables~\ref{tab:scenarios}--\ref{tab:ablation} summarize results: single-pass inference achieves $31.67$\,ms ($31.6$\,FPS) in CARLA and $30.20$\,ms ($33.1$\,FPS) in MetaDrive, while quintic S-curve blending and continuous headway ACC reduce Rule~1 AEB interventions from 71 to 27 ($100.0\%$ Driving Score).
 
 \nocite{*}

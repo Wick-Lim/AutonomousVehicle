@@ -137,6 +137,7 @@
 \centering
 \caption{CARLA 0.9.16 (\texttt{Town10HD\_Opt}) 및 MetaDrive 0.4.3 폐루프 자율주행 평가 결과.}
 \label{tab:main_results_ko}
+\resizebox{0.96\textwidth}{!}{%
 \begin{tabular}{llccc}
 \toprule
 시뮬레이터 & 평가 지표 & 목표 기준 & 측정치 & 결과 \\
@@ -154,7 +155,8 @@
  & 무사고율 & $\ge 95.0\%$ & 100.0\% & PASS \\
  & 신뢰도 보정 오차 (ECE) & $\le 0.0500$ & 0.0000 & PASS \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
 
 \section{실험 및 결론}
