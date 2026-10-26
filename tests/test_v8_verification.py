@@ -197,6 +197,79 @@ def test_cth_acc_and_bicycle_curvature_feedforward() -> None:
     assert np.isclose(debug_info["target_speed_kmh"], 24.0, atol=1e-3)
 
 
+def test_timestamp_aware_ols_under_frame_drops() -> None:
+    """Verify timestamp-aware OLS recovers exact range rate under irregular frame drops (Delta n_t > 1)."""
+    # True range rate: -4.0 m/s over irregular step intervals Delta n_t = [1, 2, 1, 3, 1] at dt = 0.05 s
+    true_rr_mps = -4.0
+    elapsed_steps_seq = [1, 2, 1, 3, 1]
+    t_obs = 0.0
+    d_obs = 30.0
+    ts_window: List[tuple[float, float]] = []
+    uniform_window: List[float] = []
+
+    for dn in elapsed_steps_seq:
+        t_obs += dn * 0.05
+        d_obs += true_rr_mps * (dn * 0.05)
+        ts_window.append((t_obs, d_obs))
+        uniform_window.append(d_obs)
+
+    t_idx = np.asarray([pt[0] for pt in ts_window], dtype=np.float64)
+    d_arr = np.asarray([pt[1] for pt in ts_window], dtype=np.float64)
+    t_mean = float(t_idx.mean())
+    ts_slope = float(
+        np.sum((t_idx - t_mean) * (d_arr - d_arr.mean()))
+        / max(1e-6, float(np.sum((t_idx - t_mean) ** 2)))
+    )
+    uniform_slope = ols_5step_slope_mps(uniform_window, dt=0.05)
+
+    # Timestamp-aware OLS recovers exact -4.0 m/s; uniform spacing overestimates magnitude (-7.0 m/s)
+    assert np.isclose(ts_slope, true_rr_mps, atol=1e-6)
+    assert abs(uniform_slope) > 1.5 * abs(true_rr_mps)
+
+
+def test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis() -> None:
+    """Verify d_AEB < d*(v_ego) non-conflict below 10.5 km/h and Stop-and-Go hysteresis latch."""
+    ctrl = SafetyShieldPID()
+    decision = {
+        "maneuver": "follow_lead",
+        "maneuver_confidence": 0.95,
+        "speed_level": 2,
+        "speed_confidence": 0.95,
+        "emergency_brake": 0.01,
+    }
+    # 1. At v_ego = 8.0 km/h (2.22 m/s), d*(8.0) = 10.67 m (< 11.5 m), steady-state following (v_lead = 8.0 km/h)
+    # Must NOT trigger Rule 1 AEB and must maintain 8.0 km/h equilibrium
+    tel_low = {
+        "speed_kmh": 8.0,
+        "lead_distance_m": 8.0 + 1.2 * (8.0 / 3.6),
+        "lead_speed_kmh": 8.0,
+        "pedestrian_distance_m": 100.0,
+        "traffic_light": "green",
+        "hazard_source": "none",
+    }
+    gated_low = ctrl.apply_safety_shield(decision, tel_low, shield_enabled=True)
+    assert not gated_low["shield_triggered"]
+    assert np.isclose(gated_low["target_speed_kmh"], 8.0, atol=1e-3)
+
+    # 2. Stop-and-Go hysteresis: enter stop-hold at v_lead = 1.0 km/h, d_lead = 8.2 m
+    tel_stop = dict(tel_low, speed_kmh=2.0, lead_speed_kmh=1.0, lead_distance_m=8.2)
+    gated_stop = ctrl.apply_safety_shield(decision, tel_stop, shield_enabled=True)
+    assert ctrl.stop_hold_active is True
+    assert gated_stop["target_speed_kmh"] == 0.0
+
+    # Remain in stop-hold inside hysteresis band (v_lead = 2.8 km/h, d_lead = 8.9 m)
+    tel_hold = dict(tel_low, speed_kmh=0.0, lead_speed_kmh=2.8, lead_distance_m=8.9)
+    gated_hold = ctrl.apply_safety_shield(decision, tel_hold, shield_enabled=True)
+    assert ctrl.stop_hold_active is True
+    assert gated_hold["target_speed_kmh"] == 0.0
+
+    # Exit stop-hold when lead vehicle departs (v_lead = 4.0 km/h, d_lead = 9.8 m)
+    tel_go = dict(tel_low, speed_kmh=0.0, lead_speed_kmh=4.0, lead_distance_m=9.8)
+    gated_go = ctrl.apply_safety_shield(decision, tel_go, shield_enabled=True)
+    assert ctrl.stop_hold_active is False
+    assert gated_go["target_speed_kmh"] > 4.0
+
+
 if __name__ == "__main__":
     test_decoupled_pedestrian_and_range_rate_heads()
     print("[PASS] test_decoupled_pedestrian_and_range_rate_heads")
@@ -208,4 +281,8 @@ if __name__ == "__main__":
     print("[PASS] test_sustained_aeb_event_grouping")
     test_cth_acc_and_bicycle_curvature_feedforward()
     print("[PASS] test_cth_acc_and_bicycle_curvature_feedforward")
-    print("All 5 v8 verification tests passed successfully.")
+    test_timestamp_aware_ols_under_frame_drops()
+    print("[PASS] test_timestamp_aware_ols_under_frame_drops")
+    test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis()
+    print("[PASS] test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis")
+    print("All 7 v9 verification tests passed successfully.")

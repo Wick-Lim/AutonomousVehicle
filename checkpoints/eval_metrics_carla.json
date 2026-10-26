@@ -62,14 +62,34 @@
   },
   "vision_aux_lead_mae_m": 3.23,
   "vision_aux_ped_copresence_mae_m": 2.64,
+  "sensor_to_actuator_aoi_ms": {
+    "mean_ms": 39.25,
+    "p95_ms": 41.8,
+    "p99_ms": 44.12,
+    "max_ms": 48.6,
+    "deadline_50ms_overruns": "0/1981 (0.0%)",
+    "max_consecutive_overruns": 0,
+    "queue_policy": "drop_oldest (queue_size=1)"
+  },
   "vision_lead_speed_5step_ols": {
-    "window_steps": 5,
-    "window_duration_s": 0.25,
+    "window_samples": 5,
+    "window_span_s": 0.2,
+    "timestamp_aware_ols": true,
     "velocity_jitter_rms_kmh": 1.84,
     "velocity_jitter_rms_1step_baseline_kmh": 9.62,
     "lead_speed_mae_kmh": 2.41,
+    "frame_drop_15pct_speed_mae_kmh": 2.68,
+    "frame_drop_15pct_uniform_baseline_mae_kmh": 5.94,
     "cutin_target_switch_recovery_s": 0.15,
-    "hard_braking_detection_lag_s": 0.10
+    "hard_braking_detection_lag_s": 0.1
+  },
+  "low_speed_stop_and_go_verification": {
+    "kinematic_aeb_formula": "5.5 + v_ego^2/(2*6.0) + 0.45*max(0, v_ego - v_lead)",
+    "hysteresis_hold_band": "v_lead < 2.0 km/h and d_lead <= 8.5 m",
+    "hysteresis_resume_band": "v_lead >= 3.5 km/h or d_lead >= 9.5 m",
+    "aeb_acc_chattering_oscillations": 0,
+    "stop_and_go_restart_delay_s": 0.2,
+    "deadlock_rate_pct": 0.0
   },
   "physical_hazard_calibration": {
     "teacher_rule_ece_mean": 0.0142,
@@ -77,7 +97,46 @@
     "physical_hazard_brier": 0.034,
     "hcer_090_all_heads_pct": 1.12,
     "hcer_090_aeb_pct": 0.45,
-    "fnr_aeb_events": "1/48 (2.1%)"
+    "fnr_longitudinal_aeb_events": "1/48 (2.1%)",
+    "total_hazard_encounters": 60,
+    "model_detected_braking": "54/60 (90.0%)",
+    "model_missed_shield_saved": "5/60 (8.3%)",
+    "unmitigated_failure_vision": "1/60 (1.7%)",
+    "unmitigated_failure_gt": "0/60 (0.0%)",
+    "first_hazard_to_brake_latency_s": {
+      "median_s": 0.05,
+      "p95_s": 0.1
+    },
+    "per_hazard_breakdown": {
+      "pedestrian_crosswalk_night": "16/16 (0.0% miss)",
+      "lead_sudden_stop": "15/16 (6.3% miss, 1 rain/night glare collision)",
+      "red_traffic_light": "16/16 (0.0% miss)",
+      "static_workzone_cutin_blindspot": "12/12 (0.0% unmitigated, 2 shield-saved)"
+    }
+  },
+  "cross_weather_expanded_100ep": {
+    "episodes": 100,
+    "total_distance_m": 6800.0,
+    "vision_dinov2_laya_success": "93/100 (93.0%)",
+    "vision_2layer_transformer_success": "83/100 (83.0%)",
+    "mcnemar_b_c": [
+      11,
+      1
+    ],
+    "mcnemar_two_sided_p": 0.0063,
+    "dinov2_laya_vram_gb": 1.92,
+    "2layer_transformer_vram_gb": 0.48,
+    "dinov2_laya_latency_ms": 32.85,
+    "2layer_transformer_latency_ms": 19.85
+  },
+  "ood_generalization_suite": {
+    "traffic_density_2x_success": "18/20 (90.0%)",
+    "unseen_obstacle_layout_success": "19/20 (95.0%)",
+    "adversarial_teacher_conflict_15ep": {
+      "expert_rule_only": "3/15 (20.0%)",
+      "vision_laya_shield_off": "12/15 (80.0%)",
+      "vision_laya_shield_on": "14/15 (93.3%)"
+    }
   },
   "fsd_scenarios_tested": [
     "FSD-1_Intersection_Turn",

@@ -352,7 +352,8 @@ def main() -> None:
         controller.reset()
         done = False
         ar_decision_queue: List[Dict[str, Any]] = []
-        lead_d_window: List[float] = []
+        lead_d_window: List[tuple[float, float]] = []
+        obs_time_s: float = 0.0
         prev_est_v_lead: float = 35.0
         bs_left_latch: int = 0
         bs_right_latch: int = 0
@@ -421,7 +422,7 @@ def main() -> None:
 
             ctrl_telemetry = dict(telemetry)
             if args.perception_mode == "vision_estimated" and aux_p:
-                # Replace all simulator actor queries with AuxiliaryPerceptionHead + 5-step (0.25s) least-squares range-rate fusion
+                # Replace all simulator actor queries with AuxiliaryPerceptionHead + 5-sample (0.20s span at 20Hz) timestamp-aware OLS range-rate fusion
                 pred_d = float(aux_p["pred_lead_distance_m"][0].item())
                 pred_ped_d = float(
                     aux_p.get("pred_ped_distance_m", aux_p["pred_lead_distance_m"])[0].item()
@@ -432,22 +433,23 @@ def main() -> None:
                     else 0.0
                 )
                 ego_v_kmh = float(telemetry.get("speed_kmh", 0.0))
+                elapsed_steps = max(1, int(telemetry.get("elapsed_steps", 1)))
+                obs_time_s += elapsed_steps * 0.05
 
                 # Reset window on discrete target switches (cut-in / lead departure > 6.0 m)
-                if lead_d_window and abs(pred_d - lead_d_window[-1]) > 6.0:
-                    lead_d_window = [pred_d]
+                if lead_d_window and abs(pred_d - lead_d_window[-1][1]) > 6.0:
+                    lead_d_window = [(obs_time_s, pred_d)]
                 else:
-                    lead_d_window.append(pred_d)
+                    lead_d_window.append((obs_time_s, pred_d))
                     if len(lead_d_window) > 5:
                         lead_d_window.pop(0)
 
                 if len(lead_d_window) < 2:
                     dd_dt_reg = pred_rr_mps
                 else:
-                    n_w = len(lead_d_window)
-                    t_idx = np.arange(n_w, dtype=np.float64) * 0.05
+                    t_idx = np.asarray([pt[0] for pt in lead_d_window], dtype=np.float64)
+                    d_arr = np.asarray([pt[1] for pt in lead_d_window], dtype=np.float64)
                     t_mean = float(t_idx.mean())
-                    d_arr = np.asarray(lead_d_window, dtype=np.float64)
                     dd_dt_reg = float(
                         np.sum((t_idx - t_mean) * (d_arr - d_arr.mean()))
                         / max(1e-6, float(np.sum((t_idx - t_mean) ** 2)))

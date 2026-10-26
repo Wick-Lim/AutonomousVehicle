@@ -95,6 +95,7 @@ class SafetyShieldPID:
         self.current_steering: float = 0.0
         self.current_throttle_brake: float = 0.0
         self.current_target_offset_m: float = 0.0
+        self.stop_hold_active: bool = False
 
         self.lateral_pid = ScalarPID(
             PIDGains(
@@ -118,6 +119,22 @@ class SafetyShieldPID:
         self.current_steering = 0.0
         self.current_throttle_brake = 0.0
         self.current_target_offset_m = 0.0
+        self.stop_hold_active = False
+
+    @staticmethod
+    def compute_kinematic_aeb_distance(
+        current_speed_kmh: float, lead_speed_kmh: float
+    ) -> float:
+        """Velocity- and closing-rate-dependent AEB threshold d_AEB(v_ego, v_lead).
+
+        d_AEB = 5.5 + v_ego^2 / (2 * a_max) + tau_react * max(0, v_ego - v_lead)
+        with a_max = 6.0 m/s^2 and tau_react = 0.45 s. Strictly below CTH-ACC
+        desired headway d*(v_ego) = 8.0 + 1.2 * v_ego across low/urban speeds.
+        """
+        v_ego_mps = max(0.0, current_speed_kmh / 3.6)
+        v_lead_mps = max(0.0, lead_speed_kmh / 3.6)
+        closing_mps = max(0.0, v_ego_mps - v_lead_mps)
+        return float(5.5 + (v_ego_mps * v_ego_mps) / 12.0 + 0.45 * closing_mps)
 
     def apply_safety_shield(
         self,
@@ -132,9 +149,11 @@ class SafetyShieldPID:
         aeb_prob = float(decision.get("emergency_brake", 0.0))
         lead_distance_m = float(telemetry.get("lead_distance_m", 60.0))
         lead_speed_kmh = float(telemetry.get("lead_speed_kmh", 60.0))
+        ped_distance_m = float(telemetry.get("pedestrian_distance_m", 100.0))
         current_speed_kmh = float(telemetry.get("speed_kmh", 0.0))
         traffic_light = str(telemetry.get("traffic_light", "green"))
         hazard_source = str(telemetry.get("hazard_source", "none"))
+        d_aeb_m = self.compute_kinematic_aeb_distance(current_speed_kmh, lead_speed_kmh)
 
         gated_maneuver = raw_maneuver
         gated_speed_level = raw_speed_level
@@ -149,11 +168,22 @@ class SafetyShieldPID:
                 shield_triggered = True
                 shield_reason = "model_aeb_only"
             target_speed_kmh = SPEED_LEVEL_KMH.get(gated_speed_level, 20.0)
-            if lead_distance_m < 38.0 and gated_speed_level > 0 and lead_speed_kmh >= 8.0 and not self.use_mock:
-                desired_gap_m = 8.0 + 1.2 * (current_speed_kmh / 3.6)
-                gap_error_m = lead_distance_m - desired_gap_m
-                acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
-                target_speed_kmh = float(np.clip(lead_speed_kmh + 0.85 * gap_error_m, 0.0, acc_upper_kmh))
+            if lead_distance_m < 38.0 and gated_speed_level > 0 and not self.use_mock:
+                if self.stop_hold_active:
+                    if lead_speed_kmh >= 3.5 or lead_distance_m >= 9.5:
+                        self.stop_hold_active = False
+                elif lead_speed_kmh < 2.0 and lead_distance_m <= 8.5:
+                    self.stop_hold_active = True
+
+                if self.stop_hold_active:
+                    target_speed_kmh = 0.0
+                else:
+                    desired_gap_m = 8.0 + 1.2 * (current_speed_kmh / 3.6)
+                    gap_error_m = lead_distance_m - desired_gap_m
+                    acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
+                    target_speed_kmh = float(
+                        np.clip(lead_speed_kmh + 0.85 * gap_error_m, 0.0, acc_upper_kmh)
+                    )
             return {
                 "raw_maneuver": raw_maneuver,
                 "raw_speed_level": raw_speed_level,
@@ -169,13 +199,14 @@ class SafetyShieldPID:
                 "blind_spot_right": bool(telemetry.get("blind_spot_right", False)),
             }
 
-        # Rule 1: Emergency Brake Priority (emergency_brake >= 0.70, CARLA red light/pedestrian, or physical TTC hazard)
+        # Rule 1: Emergency Brake Priority (emergency_brake >= 0.70, red light/pedestrian, or kinematic closing-rate AEB)
         if (
             aeb_prob >= self.aeb_threshold
             or traffic_light == "red"
+            or ped_distance_m <= 16.0
             or (hazard_source == "pedestrian" and lead_distance_m <= 16.0)
             or (
-                lead_distance_m <= 11.5
+                lead_distance_m <= d_aeb_m
                 and current_speed_kmh > max(6.0, lead_speed_kmh + 6.0)
             )
         ):
@@ -239,24 +270,35 @@ class SafetyShieldPID:
             target_speed_kmh = min(target_speed_kmh, smooth_cap)
         if lead_distance_m < 38.0 and gated_speed_level > 0:
             lead_speed_kmh = float(telemetry.get("lead_speed_kmh", target_speed_kmh))
-            if lead_speed_kmh >= 8.0 and not self.use_mock:
-                # True Constant-Time-Headway (CTH) ACC: d*(v_ego) = d_0 + tau_h * (v_ego_kmh / 3.6)
-                # With d_0 = 8.0 m, tau_h = 1.2 s (equals 16.0 m at v_ego = 24 km/h),
-                # and proportional gain k_g = 0.85 (km/h)/m (equivalent to 0.236 s^-1 in SI units).
-                d0_m = 8.0
-                tau_h_s = 1.2
-                kg_kmh_per_m = 0.85
-                desired_gap_m = d0_m + tau_h_s * (current_speed_kmh / 3.6)
-                gap_error_m = lead_distance_m - desired_gap_m
-                acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
-                acc_sync_speed = float(
-                    np.clip(
-                        lead_speed_kmh + kg_kmh_per_m * gap_error_m,
-                        0.0,
-                        acc_upper_kmh,
+            if not self.use_mock:
+                # Stop-and-Go hysteresis: hold full stop when lead < 2.0 km/h and d_lead <= 8.5 m;
+                # release only when lead >= 3.5 km/h or d_lead >= 9.5 m.
+                if self.stop_hold_active:
+                    if lead_speed_kmh >= 3.5 or lead_distance_m >= 9.5:
+                        self.stop_hold_active = False
+                elif lead_speed_kmh < 2.0 and lead_distance_m <= 8.5:
+                    self.stop_hold_active = True
+
+                if self.stop_hold_active:
+                    target_speed_kmh = 0.0
+                else:
+                    # True Constant-Time-Headway (CTH) ACC down to 0 km/h: d*(v_ego) = d_0 + tau_h * (v_ego_kmh / 3.6)
+                    # With d_0 = 8.0 m, tau_h = 1.2 s (equals 16.0 m at v_ego = 24 km/h),
+                    # and proportional gain k_g = 0.85 (km/h)/m (equivalent to 0.236 s^-1 in SI units).
+                    d0_m = 8.0
+                    tau_h_s = 1.2
+                    kg_kmh_per_m = 0.85
+                    desired_gap_m = d0_m + tau_h_s * (current_speed_kmh / 3.6)
+                    gap_error_m = lead_distance_m - desired_gap_m
+                    acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
+                    acc_sync_speed = float(
+                        np.clip(
+                            lead_speed_kmh + kg_kmh_per_m * gap_error_m,
+                            0.0,
+                            acc_upper_kmh,
+                        )
                     )
-                )
-                target_speed_kmh = acc_sync_speed
+                    target_speed_kmh = acc_sync_speed
             else:
                 v_ego = current_speed_kmh / 3.6
                 v_lead = lead_speed_kmh / 3.6
