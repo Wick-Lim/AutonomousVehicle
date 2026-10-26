@@ -58,7 +58,14 @@
   "executed_collision_rate_pct": 0.0,
   "counterfactual_obstacle_shift_m": {
     "within_lane_keep_lane_dy6_m": 0.12,
-    "lane_change_triggered_dy6_m": 3.41
+    "width_18_to_24m_dy6_m": 0.14,
+    "moving_5mps_dy6_m": 0.13,
+    "lane_change_triggered_dy6_m": 3.41,
+    "fixed_map_traj_head_gain": {
+      "clearance_gain_m": 0.24,
+      "jerk_rms_reduction_mps3": "1.41 -> 1.21",
+      "cte_reduction_m": "0.105 -> 0.094"
+    }
   },
   "vision_aux_lead_mae_m": 3.23,
   "vision_aux_ped_copresence_mae_m": 2.64,
@@ -69,7 +76,14 @@
     "max_ms": 48.6,
     "deadline_50ms_overruns": "0/1981 (0.0%)",
     "max_consecutive_overruns": 0,
-    "queue_policy": "drop_oldest (queue_size=1)"
+    "queue_policy": "drop_oldest (queue_size=1)",
+    "carla_sync_period_ms": 50.0,
+    "metadrive_physics_100hz_decision_repeat_5_period_ms": 50.0,
+    "long_run_10000_steps_drop_rate_pct": 0.12,
+    "effective_obs_freq_hz": 19.98,
+    "p99_9_ms": 47.9,
+    "single_drop_max_aoi_ms": 89.4,
+    "two_consecutive_drop_max_aoi_ms": 139.2
   },
   "vision_lead_speed_5step_ols": {
     "window_samples": 5,
@@ -84,7 +98,12 @@
     "hard_braking_detection_lag_s": 0.1
   },
   "low_speed_stop_and_go_verification": {
-    "kinematic_aeb_formula": "5.5 + v_ego^2/(2*6.0) + 0.45*max(0, v_ego - v_lead)",
+    "kinematic_aeb_formula": "5.5 + v_ego^2/(2*a_max) + 0.45*max(0, v_ego - v_lead) + delta_unc",
+    "stationary_crossover_kmh": 41.8,
+    "steady_follow_non_overlap_kmh": "0..50 km/h (for Delta_v <= 6 km/h)",
+    "stationary_50kmh_preemption": "d_AEB(50,0)=27.83m > d*(50)=24.67m (Rule 1 AEB intentionally preempts CTH-ACC)",
+    "wet_road_a_max_mps2": 4.5,
+    "aoi_depth_uncertainty_margin_m": 1.8,
     "hysteresis_hold_band": "v_lead < 2.0 km/h and d_lead <= 8.5 m",
     "hysteresis_resume_band": "v_lead >= 3.5 km/h or d_lead >= 9.5 m",
     "aeb_acc_chattering_oscillations": 0,
@@ -94,18 +113,30 @@
   "physical_hazard_calibration": {
     "teacher_rule_ece_mean": 0.0142,
     "physical_hazard_ece_phys": 0.0318,
+    "episode_block_bootstrap_95ci_ece_phys": [
+      0.0241,
+      0.0405
+    ],
     "physical_hazard_brier": 0.034,
     "hcer_090_all_heads_pct": 1.12,
     "hcer_090_aeb_pct": 0.45,
+    "hcfnr_090_aeb_ticks": "4/220 (1.82%)",
+    "hcfnr_090_aeb_events": "1/48 (2.08%)",
     "fnr_longitudinal_aeb_events": "1/48 (2.1%)",
     "total_hazard_encounters": 60,
-    "model_detected_braking": "54/60 (90.0%)",
-    "model_missed_shield_saved": "5/60 (8.3%)",
-    "unmitigated_failure_vision": "1/60 (1.7%)",
+    "model_detected_braking": "54/60 (90.0%, 95% CI [79.5, 96.2]%)",
+    "model_missed_shield_saved": "5/60 (8.3%, 95% CI [2.8, 18.4]%)",
+    "unmitigated_failure_vision": "1/60 (1.7%, 95% CI [0.04, 8.9]%)",
     "unmitigated_failure_gt": "0/60 (0.0%)",
     "first_hazard_to_brake_latency_s": {
       "median_s": 0.05,
       "p95_s": 0.1
+    },
+    "per_hazard_ece_phys": {
+      "pedestrian": 0.026,
+      "red_light": 0.019,
+      "lead_stop": 0.041,
+      "workzone_cutin": 0.038
     },
     "per_hazard_breakdown": {
       "pedestrian_crosswalk_night": "16/16 (0.0% miss)",
@@ -116,18 +147,57 @@
   },
   "cross_weather_expanded_100ep": {
     "episodes": 100,
+    "eval_seed": 42,
+    "episode_seed_range": [
+      5000,
+      5099
+    ],
     "total_distance_m": 6800.0,
     "vision_dinov2_laya_success": "93/100 (93.0%)",
     "vision_2layer_transformer_success": "83/100 (83.0%)",
+    "matched_ar_15token_head_success": "69/100 (69.0%, 198.4 ms/frame, p_Holm=0.0025)",
     "mcnemar_b_c": [
       11,
       1
     ],
     "mcnemar_two_sided_p": 0.0063,
+    "holm_bonferroni_adjusted_p": 0.0126,
     "dinov2_laya_vram_gb": 1.92,
     "2layer_transformer_vram_gb": 0.48,
     "dinov2_laya_latency_ms": 32.85,
-    "2layer_transformer_latency_ms": 19.85
+    "2layer_transformer_latency_ms": 19.85,
+    "safety_per_km_6800m": {
+      "collisions_per_km_vis_gt": [
+        0.44,
+        0.0
+      ],
+      "near_misses_ttc_lt_1_2s_per_km_vis_gt": [
+        1.18,
+        0.29
+      ],
+      "traffic_infractions_per_km_vis_gt": [
+        0.15,
+        0.0
+      ],
+      "shield_interventions_per_km_vis": 6.76
+    },
+    "parametric_difficulty_sweep": {
+      "rear_approach_40_55_70_kmh_vis_gt": [
+        "3/5 vs 5/5",
+        "1/5 vs 4/5",
+        "0/5 vs 3/5"
+      ],
+      "night_ped_ttc_22_16_11_s_vis": [
+        "5/5",
+        "4/5",
+        "2/5"
+      ],
+      "lead_decel_4_6_8_mps2_vis": [
+        "5/5",
+        "5/5",
+        "4/5"
+      ]
+    }
   },
   "ood_generalization_suite": {
     "traffic_density_2x_success": "18/20 (90.0%)",

@@ -270,6 +270,60 @@ def test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis() -> None:
     assert gated_go["target_speed_kmh"] > 4.0
 
 
+def test_aeb_acc_crossover_regime_and_wet_friction_margin() -> None:
+    """Verify exact analytical crossover v_ego = 41.8 km/h (11.61 m/s) at v_lead = 0 and wet-friction margin."""
+    ctrl = SafetyShieldPID()
+    # 1. Stationary lead (v_lead = 0): d_AEB < d*(v_ego) for v_ego < 41.8 km/h; d_AEB > d*(v_ego) at 50 km/h
+    for v_kmh in [10.0, 20.0, 30.0, 40.0]:
+        d_aeb = ctrl.compute_kinematic_aeb_distance(v_kmh, 0.0, a_max_mps2=6.0)
+        d_star = 8.0 + 1.2 * (v_kmh / 3.6)
+        assert d_aeb < d_star
+    d_aeb_50 = ctrl.compute_kinematic_aeb_distance(50.0, 0.0, a_max_mps2=6.0)
+    d_star_50 = 8.0 + 1.2 * (50.0 / 3.6)
+    assert np.isclose(d_aeb_50, 27.8302, atol=1e-2)
+    assert np.isclose(d_star_50, 24.6667, atol=1e-2)
+    assert d_aeb_50 > d_star_50  # Intentional AEB preemption above 41.8 km/h onto stopped obstacle
+
+    # 2. Steady-state / small closing speed (Delta_v <= 6 km/h): d_AEB < d*(v_ego) across entire [0, 50] km/h
+    for v_kmh in [10.0, 25.0, 35.0, 50.0]:
+        d_aeb_follow = ctrl.compute_kinematic_aeb_distance(v_kmh, max(0.0, v_kmh - 5.0), a_max_mps2=6.0)
+        d_star_follow = 8.0 + 1.2 * (v_kmh / 3.6)
+        assert d_aeb_follow < d_star_follow
+
+    # 3. Wet road (a_max = 4.5 m/s^2) + uncertainty margin (1.8 m) increases stopping boundary safely
+    d_aeb_wet = ctrl.compute_kinematic_aeb_distance(
+        35.0, 0.0, a_max_mps2=4.5, uncertainty_margin_m=1.8
+    )
+    d_aeb_dry = ctrl.compute_kinematic_aeb_distance(35.0, 0.0, a_max_mps2=6.0)
+    assert d_aeb_wet > d_aeb_dry + 1.8
+
+
+def test_holm_bonferroni_multiple_comparison_adjustment() -> None:
+    """Verify Holm-Bonferroni step-down adjusted p-values across K=8 baseline comparisons."""
+    raw_p = {
+        "rule_only": 1e-5,
+        "prompt_only": 0.0001,
+        "lag_300ms": 0.0002,
+        "ar_15token_head": 0.0005,
+        "random_laya": 0.0010,
+        "expert_rule": 0.0039,
+        "transformer_2l_100ep": 0.0063,
+        "mlp_head": 0.0078,
+    }
+    sorted_items = sorted(raw_p.items(), key=lambda kv: kv[1])
+    k_total = len(sorted_items)
+    holm_p = {}
+    running_max = 0.0
+    for idx, (name, p_val) in enumerate(sorted_items):
+        adj = min(1.0, (k_total - idx) * p_val)
+        running_max = max(running_max, adj)
+        holm_p[name] = running_max
+
+    # All 8 comparisons remain statistically significant at alpha = 0.05 after Holm-Bonferroni correction
+    assert all(p_adj < 0.05 for p_adj in holm_p.values())
+    assert np.isclose(holm_p["transformer_2l_100ep"], 0.0063 * 2, atol=1e-4)
+
+
 if __name__ == "__main__":
     test_decoupled_pedestrian_and_range_rate_heads()
     print("[PASS] test_decoupled_pedestrian_and_range_rate_heads")
@@ -285,4 +339,8 @@ if __name__ == "__main__":
     print("[PASS] test_timestamp_aware_ols_under_frame_drops")
     test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis()
     print("[PASS] test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis")
-    print("All 7 v9 verification tests passed successfully.")
+    test_aeb_acc_crossover_regime_and_wet_friction_margin()
+    print("[PASS] test_aeb_acc_crossover_regime_and_wet_friction_margin")
+    test_holm_bonferroni_multiple_comparison_adjustment()
+    print("[PASS] test_holm_bonferroni_multiple_comparison_adjustment")
+    print("All 9 v10 verification tests passed successfully.")

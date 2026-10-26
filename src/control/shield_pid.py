@@ -123,18 +123,30 @@ class SafetyShieldPID:
 
     @staticmethod
     def compute_kinematic_aeb_distance(
-        current_speed_kmh: float, lead_speed_kmh: float
+        current_speed_kmh: float,
+        lead_speed_kmh: float,
+        a_max_mps2: float = 6.0,
+        uncertainty_margin_m: float = 0.0,
     ) -> float:
-        """Velocity- and closing-rate-dependent AEB threshold d_AEB(v_ego, v_lead).
+        """Velocity-, friction-, and closing-rate-dependent AEB boundary d_AEB(v_ego, v_lead).
 
-        d_AEB = 5.5 + v_ego^2 / (2 * a_max) + tau_react * max(0, v_ego - v_lead)
-        with a_max = 6.0 m/s^2 and tau_react = 0.45 s. Strictly below CTH-ACC
-        desired headway d*(v_ego) = 8.0 + 1.2 * v_ego across low/urban speeds.
+        d_AEB = 5.5 + v_ego^2 / (2 * a_max) + tau_react * max(0, v_ego - v_lead) + delta_unc
+        with dry a_max = 6.0 m/s^2 (wet a_max = 4.5 m/s^2) and tau_react = 0.45 s:
+          - Regime 1 (Non-overlap): d_AEB < d*(v_ego) = 8.0 + 1.2 * v_ego for all v_ego in [0, 50] km/h
+            when closing speed Delta_v <= 6 km/h, and for v_ego < 41.8 km/h (11.61 m/s) when v_lead = 0.
+          - Regime 2 (Intentional AEB Preemption): For v_ego >= 41.8 km/h approaching a stationary lead
+            (e.g., d_AEB(50, 0) = 27.83 m > d*(50) = 24.67 m), Rule 1 AEB intentionally overrides CTH-ACC.
         """
         v_ego_mps = max(0.0, current_speed_kmh / 3.6)
         v_lead_mps = max(0.0, lead_speed_kmh / 3.6)
         closing_mps = max(0.0, v_ego_mps - v_lead_mps)
-        return float(5.5 + (v_ego_mps * v_ego_mps) / 12.0 + 0.45 * closing_mps)
+        eff_a_max = max(2.5, float(a_max_mps2))
+        return float(
+            5.5
+            + (v_ego_mps * v_ego_mps) / (2.0 * eff_a_max)
+            + 0.45 * closing_mps
+            + float(uncertainty_margin_m)
+        )
 
     def apply_safety_shield(
         self,
@@ -153,7 +165,15 @@ class SafetyShieldPID:
         current_speed_kmh = float(telemetry.get("speed_kmh", 0.0))
         traffic_light = str(telemetry.get("traffic_light", "green"))
         hazard_source = str(telemetry.get("hazard_source", "none"))
-        d_aeb_m = self.compute_kinematic_aeb_distance(current_speed_kmh, lead_speed_kmh)
+        wet_road = bool(telemetry.get("wet_road", False))
+        a_max_mps2 = 4.5 if wet_road else float(telemetry.get("a_max_mps2", 6.0))
+        unc_margin_m = float(telemetry.get("uncertainty_margin_m", 0.0))
+        d_aeb_m = self.compute_kinematic_aeb_distance(
+            current_speed_kmh,
+            lead_speed_kmh,
+            a_max_mps2=a_max_mps2,
+            uncertainty_margin_m=unc_margin_m,
+        )
 
         gated_maneuver = raw_maneuver
         gated_speed_level = raw_speed_level
