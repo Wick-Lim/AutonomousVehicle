@@ -37,7 +37,7 @@
 ## 2. 입출력 및 안전·궤적 제어 명세 (I/O, Safety Gating & Smooth Kinematics)
 
 ### 2.1. 상태 입력 (Inputs)
-* **시각 입력:** 상하 불필요 영역(하늘, 보닛)을 배제($\texttt{crop\_top}=0.25, \texttt{crop\_bottom}=0.10$)하고 좌우 차선 시야를 확보한 **$196(\text{세로}) \times 392(\text{가로})$ 와이드 RGB 영상**
+* **시각 입력:** 상하 불필요 영역(하늘, 보닛)을 배제(`crop_top = 0.25`, `crop_bottom = 0.10`)하고 좌우 차선 시야를 확보한 **$196 \times 392$ (`세로 × 가로`) 와이드 RGB 영상**
 * **정형 텔레메트리 (`TelemetryState` JSON — `vision_estimated` 모드 시 시뮬레이터 액터 쿼리 0회):**
   * `speed_kmh`: 휠 오도메트리/IMU 기반 자차 속도 ($\text{km/h}$)
   * `lane_offset_m`, `heading_error`: HD 맵 중심선 기준 횡방향 오차($\text{m}$) 및 접선 헤딩 오차($\text{rad}$)

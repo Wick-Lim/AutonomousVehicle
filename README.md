@@ -37,7 +37,7 @@
 ## 2. I/O Specification, Safety Gating & Smooth Kinematics
 
 ### 2.1. Multimodal Inputs
-* **Wide-Aspect Visual Input:** **$196(\text{H}) \times 392(\text{W})$ Wide RGB frame** ($\texttt{crop\_top}=0.25, \texttt{crop\_bottom}=0.10$, cropping sky and hood to maximize horizontal multi-lane field of view).
+* **Wide-Aspect Visual Input:** **$196 \times 392$ (`H × W`) Wide RGB frame** (`crop_top = 0.25`, `crop_bottom = 0.10`, cropping sky and hood to maximize horizontal multi-lane field of view).
 * **Structured Telemetry (`TelemetryState` JSON — Zero Simulator Actor Queries in `vision_estimated` Mode):**
   * `speed_kmh`: Ego velocity ($\text{km/h}$) from wheel-odometry / IMU.
   * `lane_offset_m`, `heading_error`: Cross-track error ($\text{m}$) and tangent heading error ($\text{rad}$) against the HD map centerline.
