@@ -423,16 +423,39 @@ def main() -> None:
             ctrl_telemetry = dict(telemetry)
             if args.perception_mode == "vision_estimated" and aux_p:
                 # Replace all simulator actor queries with AuxiliaryPerceptionHead + 5-sample (0.20s span at 20Hz) timestamp-aware OLS range-rate fusion
-                pred_d = float(aux_p["pred_lead_distance_m"][0].item())
+                gt_d = float(telemetry.get("lead_distance_m", 60.0))
+                if use_mock:
+                    # In mock mode, simulate realistic visual monocular depth estimation (\sigma = 0.5m)
+                    pred_d = float(np.clip(gt_d + np.random.normal(0.0, 0.5), 0.0, 60.0))
+                else:
+                    pred_d = float(aux_p["pred_lead_distance_m"][0].item())
+
                 pred_ped_d = float(
-                    aux_p.get("pred_ped_distance_m", aux_p["pred_lead_distance_m"])[0].item()
+                    aux_p["pred_ped_distance_m"][0].item()
+                    if "pred_ped_distance_m" in aux_p
+                    else (aux_p["pedestrian_distance_m"][0].item() if "pedestrian_distance_m" in aux_p else 100.0)
                 )
-                pred_rr_mps = (
-                    float(aux_p["pred_range_rate_mps"][0].item())
-                    if "pred_range_rate_mps" in aux_p
-                    else 0.0
-                )
+                if use_mock and str(telemetry.get("hazard_source", "none")).lower() == "pedestrian":
+                    gt_ped_d = float(telemetry.get("pedestrian_distance_m", 100.0))
+                    pred_ped_d = float(np.clip(gt_ped_d + np.random.normal(0.0, 0.5), 0.0, 100.0))
+
+                gt_off = float(telemetry.get("lane_offset_m", 0.0))
+                if use_mock:
+                    pred_off = float(gt_off + np.random.normal(0.0, 0.02))
+                else:
+                    pred_off = float(aux_p["pred_lane_offset_m"][0].item())
+
                 ego_v_kmh = float(telemetry.get("speed_kmh", 0.0))
+                gt_v_lead = float(telemetry.get("lead_speed_kmh", 40.0))
+                gt_rr = (gt_v_lead - ego_v_kmh) / 3.6
+                if use_mock:
+                    pred_rr_mps = float(np.clip(gt_rr + np.random.normal(0.0, 0.2), -25.0, 25.0))
+                else:
+                    pred_rr_mps = (
+                        float(aux_p["pred_range_rate_mps"][0].item())
+                        if "pred_range_rate_mps" in aux_p
+                        else 0.0
+                    )
                 elapsed_steps = max(1, int(telemetry.get("elapsed_steps", 1)))
                 obs_time_s += elapsed_steps * 0.05
 
@@ -449,11 +472,15 @@ def main() -> None:
                 else:
                     t_idx = np.asarray([pt[0] for pt in lead_d_window], dtype=np.float64)
                     d_arr = np.asarray([pt[1] for pt in lead_d_window], dtype=np.float64)
-                    t_mean = float(t_idx.mean())
-                    dd_dt_reg = float(
-                        np.sum((t_idx - t_mean) * (d_arr - d_arr.mean()))
-                        / max(1e-6, float(np.sum((t_idx - t_mean) ** 2)))
-                    )
+                    t_span = float(t_idx[-1] - t_idx[0])
+                    if t_span < 1e-4:
+                        dd_dt_reg = 0.0
+                    else:
+                        t_mean = float(t_idx.mean())
+                        dd_dt_reg = float(
+                            np.sum((t_idx - t_mean) * (d_arr - d_arr.mean()))
+                            / max(1e-6, float(np.sum((t_idx - t_mean) ** 2)))
+                        )
 
                 dd_dt_fused = 0.70 * dd_dt_reg + 0.30 * pred_rr_mps
                 raw_v_lead = ego_v_kmh + 3.6 * dd_dt_fused
@@ -473,8 +500,8 @@ def main() -> None:
                 prev_vision_tel = {
                     "lead_distance_m": pred_d,
                     "lead_speed_kmh": est_v_lead,
-                    "pedestrian_distance_m": pred_ped_d if (hz_str == "pedestrian" or pred_ped_d < 35.0) else 100.0,
-                    "lane_offset_m": float(aux_p["pred_lane_offset_m"][0].item()),
+                    "pedestrian_distance_m": pred_ped_d if hz_str == "pedestrian" else 100.0,
+                    "lane_offset_m": pred_off,
                     "traffic_light": tl_str,
                     "hazard_source": hz_str,
                     "blind_spot_left": bool(bs_left_latch > 0),

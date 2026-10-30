@@ -2,7 +2,15 @@
 
 \usepackage{fontspec}
 \usepackage{xeCJK}
-\setCJKmainfont{Malgun Gothic}
+\IfFontExistsTF{Malgun Gothic}{%
+  \setCJKmainfont{Malgun Gothic}%
+}{%
+  \IfFontExistsTF{Apple SD Gothic Neo}{%
+    \setCJKmainfont{Apple SD Gothic Neo}%
+  }{%
+    \setCJKmainfont{AppleGothic}%
+  }%
+}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{graphicx}
 \usepackage{booktabs}
@@ -23,7 +31,7 @@
     urlcolor=blue
 }
 
-\title{4$\times$9 공간 패치 풀링과 5차 S-커브 궤적 보간을 이용한 단일 패스 비전-언어 자율주행 제어}
+\title{\texorpdfstring{$4\times 9$}{4x9} 공간 패치 풀링과 5차 S-커브 궤적 보간을 이용한 단일 패스 비전-언어 자율주행 제어}
 
 \author{
   Wick-Lim \\
@@ -47,7 +55,7 @@
 \begin{align}
     m_t &\in \{\texttt{keep\_lane}, \texttt{change\_left}, \nonumber\\
         &\quad\; \texttt{change\_right}, \texttt{follow\_lead}\}, \\
-    s_t &\in \{0, 1, 2, 3\} \mapsto \{0, 20, 35, 50\}\,\text{km/h}, \quad p_{\text{AEB}} \in [0, 1].
+    s_t &\in \{0, 1, 2, 3\} \mapsto \{0, 20, 40, 65\}\,\text{km/h}, \quad p_{\text{AEB}} \in [0, 1].
 \end{align}
 
 \begin{figure*}[t]
@@ -59,7 +67,7 @@
 
 \section{아키텍처, 다중 과업 학습 및 시공간 확장}
 
-\subsection{4$\times$9 시공간 프로젝터 및 분리형 보조 비전 인지 헤드}
+\subsection{\texorpdfstring{$4\times 9$}{4x9} 시공간 프로젝터 및 분리형 보조 비전 인지 헤드}
 원본 영상에서 상단 25\%(하늘)와 하단 10\%(보닛)를 잘라낸 $196 \times 392$ 영상을 동결된 \texttt{facebook/dinov2-base} \cite{oquab2024dinov2}(86.58M 파라미터)에 통과시켜 $14 \times 28 = 392$개의 768차원 패치 특징 $F_{\text{patch}}$를 추출한다. \texttt{SpatialProjector} 모듈은 $(4, 9)$ 적응형 평균 풀링, 2D 행·열 위치 임베딩, 2층 GELU MLP(1.85M 코어 파라미터), 그리고 프레임 드롭 시 경과 스텝 수 $\Delta n_t \ge 1$로 정규화된 시간 차분 잔차 $\Delta V_t = (V_t - V_{t-\Delta n_t})/\Delta n_t$(1.05M 파라미터)를 결합한다:
 \begin{align}
     G_t &= \text{AdaptiveAvgPool2d}_{(4,9)}(\tilde{F}_t) \in \mathbb{R}^{B \times 768 \times 4 \times 9}, \\
@@ -168,6 +176,7 @@ $-$ 속도 감쇠 선형 조향 램프 ($\Delta\delta_{\max}=\infty$) & 10/10 & 
 \section{실험 분석, 하드웨어 사양 및 한계점}
 모든 실험은 AMD Ryzen~5 7500F 및 NVIDIA GeForce RTX~4070~Ti(12\,GB), Windows~11, PyTorch~2.13.0(FP32, $B=1$) 환경에서 수행되었다. CARLA는 센서 획득·신경망 추론·PID 제어가 모두 $20$\,Hz($\Delta t=50$\,ms, \texttt{decision\_repeat=1}) 동기 모드로 작동하며, MetaDrive는 $100$\,Hz 물리 엔진($\Delta t_{\text{phys}}=10$\,ms)에 \texttt{decision\_repeat=5}를 적용해 동일하게 $20$\,Hz($50$\,ms) 주기로 정책·PID를 갱신한다. 동일 1,981개 프레임에서 7개 단계의 합은 정확히 32.85\,ms(기본 31.67\,ms)이며, \texttt{queue\_size=1} \texttt{drop\_oldest} 정책 하의 10,000스텝(500\,s) 장시간 부하 시험에서 자연 프레임 드롭률은 0.12\%(유효 관측 주기 19.98\,Hz, P99.9 AoI 47.90\,ms, 1프레임 드롭 시 최대 AoI 89.4\,ms, 2연속 드롭 시 139.2\,ms; 15\% 드롭 스트레스 시 유효 관측 주기 17.0\,Hz)이다. 표~\ref{tab:ablation_ko}(\texttt{seed=42}, 에피소드 $5000..5099$)은 사전학습 효과(동일 395M 규모의 무작위 동결 Laya 71/100 대비 93/100, $p_{\text{Holm}}=0.0040$), 모델 규모 효과(2층 학습형 트랜스포머 83/100 대비 93/100, $b=11, c=1$, 원시 $p=0.0063$, Holm--Bonferroni 다중검정 보정 $p_{\text{Holm}}=0.0126 < 0.05$), 그리고 디코딩 방식 효과(동일 학습 데이터·제어기를 공유하는 15-토큰 자기회귀 디코더 헤드 69/100, 198.4\,ms/frame 대비 $p_{\text{Holm}}=0.0025$)를 분리하여 $20$\,Hz 실시간 예산 하에서 본 하이브리드 구성의 유효성을 입증한다. 6.8\,km($N=100$) 주행 거리당 안전 지표는 충돌 $0.44$건/km(\texttt{gt} $0.00$), 근접사고($\text{TTC}<1.2$\,s) $1.18$건/km(\texttt{gt} $0.29$), 법규 위반 $0.15$건/km(\texttt{gt} $0.00$), 실드 개입 $6.76$회/km이며, 난도 변화 실험에서 선행차 감속도 $4\to 8\,\text{m/s}^2$($5/5\to 4/5$) 및 야간 보행자 $\text{TTC}_0: 2.2\to 1.1$\,s($5/5\to 2/5$)에서는 완만한 성능 저하를 보인 반면 후방 사각지대 접근 속도 $40\to 70$\,km/h($3/5\to 0/5$ Vis vs.\ $5/5\to 3/5$ \texttt{gt})는 후방 센서 결합이 필수적임을 확인했다.
 
+\nocite{*}
 \bibliographystyle{plain}
 \bibliography{references}
 

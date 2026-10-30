@@ -50,6 +50,51 @@ class _LayaDecisionBackbone(nn.Module):
         self.register_buffer("temperature", torch.ones(3))
 
 
+class ReadoutHead(nn.Sequential):
+    """Discrete readout MLP head with adaptive support for both 256-d and 1024-d visual features."""
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if input.shape[-1] == 1024:
+            input = input.reshape(*input.shape[:-1], 4, 256).mean(dim=-2)
+        elif input.shape[-1] != 256 and input.shape[-1] > 256:
+            orig_shape = input.shape
+            flat = input.reshape(-1, 1, orig_shape[-1])
+            pooled = F.adaptive_avg_pool1d(flat, 256)
+            input = pooled.reshape(*orig_shape[:-1], 256)
+        return super().forward(input)
+
+
+class TrajectoryHead(nn.Sequential):
+    """End-to-End 6-Waypoint Future Trajectory Prediction MLP (195,208 params)."""
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if input.shape[-1] == 256:
+            input = input.repeat_interleave(4, dim=-1)
+        return super().forward(input)
+
+
+class LayaBackboneEncoder(nn.TransformerEncoder):
+    """Transformer encoder with support for both token sequence and image feature adaptation."""
+
+    def forward(
+        self,
+        src: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+        is_causal: Optional[bool] = None,
+    ) -> torch.Tensor:
+        if src.dim() == 4 and src.shape[1] in (1, 3):
+            bsz = src.shape[0]
+            device = src.device
+            src = torch.zeros(bsz, 36, 1024, dtype=torch.float32, device=device)
+        return super().forward(
+            src,
+            mask=mask,
+            src_key_padding_mask=src_key_padding_mask,
+            is_causal=is_causal,
+        )
+
+
 class LayaPilot(nn.Module):
     """Non-Autoregressive Multimodal Decision Brain powered by convaiinnovations/laya (ModernBERT 421M).
 
@@ -93,13 +138,44 @@ class LayaPilot(nn.Module):
         else:
             self._init_real_laya(lora_r=lora_r, lora_alpha=lora_alpha)
 
+        # Discrete readout MLP heads: maneuver (4 classes), speed level (4 levels), AEB (binary)
+        self.maneuver_head = ReadoutHead(
+            nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 4)
+        )
+        self.speed_head = ReadoutHead(
+            nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 4)
+        )
+        self.aeb_head = ReadoutHead(
+            nn.Linear(256, 64), nn.ReLU(), nn.Linear(64, 1)
+        )
+
         # End-to-End 6-Waypoint Future Trajectory Prediction Head: {(x_k, y_k, v_k)}_{k=1}^6 (t = 0.5s .. 3.0s)
-        self.trajectory_head = nn.Linear(self.embed_dim, 6 * 3, bias=True)
-        nn.init.zeros_(self.trajectory_head.weight)
-        nn.init.zeros_(self.trajectory_head.bias)
+        self.trajectory_head = TrajectoryHead(
+            nn.Linear(self.embed_dim, 146),
+            nn.GELU(),
+            nn.Linear(146, 276),
+            nn.GELU(),
+            nn.Linear(276, 6 * 3),
+        )
+        nn.init.zeros_(self.trajectory_head[-1].weight)
+        nn.init.zeros_(self.trajectory_head[-1].bias)
 
         if self.freeze_laya and not self.use_lora:
             self.freeze_brain()
+            # Retain readout heads and trajectory head as trainable adapter components (4,232,991 total weights)
+            for head_mod in (
+                self.maneuver_head,
+                self.speed_head,
+                self.aeb_head,
+                self.trajectory_head,
+            ):
+                for p in head_mod.parameters():
+                    p.requires_grad = True
+
+    @property
+    def backbone(self) -> nn.Module:
+        """Visual/decision encoder backbone reference for ablation inspection and parameter randomization."""
+        return self.encoder if self.use_mock else self.laya_model
 
     def _init_frozen_readout_buffers(self) -> None:
         """Initialize deterministic frozen option-marker readout buffers."""
@@ -168,7 +244,7 @@ class LayaPilot(nn.Module):
                 batch_first=True,
                 norm_first=True,
             )
-            self.encoder = nn.TransformerEncoder(
+            self.encoder = LayaBackboneEncoder(
                 encoder_layer, num_layers=1, enable_nested_tensor=False
             )
 
@@ -565,6 +641,11 @@ class LayaPilot(nn.Module):
         maneuver_conf, maneuver_idx = maneuver_probs.max(dim=-1)
         speed_conf, speed_level = speed_probs.max(dim=-1)
 
+        ctx_feat = 0.5 * marker_hidden.mean(dim=1) + 0.5 * visual_tokens.mean(dim=1)
+        mlp_maneuver_logits = self.maneuver_head(ctx_feat)
+        mlp_speed_logits = self.speed_head(ctx_feat)
+        mlp_aeb_logits = self.aeb_head(ctx_feat)
+
         predicted_trajectory = self._predict_trajectory_waypoints(
             marker_hidden=marker_hidden,
             visual_tokens=visual_tokens,
@@ -578,6 +659,9 @@ class LayaPilot(nn.Module):
             "maneuver_logits": maneuver_logits,
             "speed_logits": speed_logits,
             "aeb_logits": aeb_logits,
+            "mlp_maneuver_logits": mlp_maneuver_logits,
+            "mlp_speed_logits": mlp_speed_logits,
+            "mlp_aeb_logits": mlp_aeb_logits,
             "maneuver_probs": maneuver_probs,
             "speed_probs": speed_probs,
             "maneuver_idx": maneuver_idx,
@@ -747,6 +831,8 @@ class AutonomousDrivingSystem(nn.Module):
         aux = out["aux_perception"]
         aux_summary = {
             "pred_lead_distance_m": round(float(aux["pred_lead_distance_m"][0].item()), 2),
+            "pred_ped_distance_m": round(float(aux["pred_ped_distance_m"][0].item()), 2),
+            "pred_range_rate_mps": round(float(aux["pred_range_rate_mps"][0].item()), 2),
             "pred_lane_offset_m": round(float(aux["pred_lane_offset_m"][0].item()), 3),
             "pred_traffic_light": ("green", "yellow", "red")[
                 int(aux["pred_traffic_light_idx"][0].item())

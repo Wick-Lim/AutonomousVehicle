@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import List
@@ -14,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.control.shield_pid import SafetyShieldPID
+from src.models.laya_pilot import AutonomousDrivingSystem
 from src.models.spatial_projector import AuxiliaryPerceptionHead, SpatialProjector
 
 
@@ -324,23 +327,214 @@ def test_holm_bonferroni_multiple_comparison_adjustment() -> None:
     assert np.isclose(holm_p["transformer_2l_100ep"], 0.0063 * 2, atol=1e-4)
 
 
+def test_trainable_parameter_count_exact_invariant() -> None:
+    """Verify total trainable parameters in AutonomousDrivingSystem strictly equals 4,232,991."""
+    system = AutonomousDrivingSystem(use_mock=True)
+    trainable_params = [p for p in system.parameters() if p.requires_grad]
+    total_trainable = sum(p.numel() for p in trainable_params)
+
+    assert total_trainable == 4_232_991, (
+        f"Expected exactly 4,232,991 trainable parameters, got {total_trainable}"
+    )
+
+    proj_params = sum(p.numel() for p in system.projector.parameters() if p.requires_grad)
+    maneuver_params = sum(p.numel() for p in system.laya.maneuver_head.parameters() if p.requires_grad)
+    speed_params = sum(p.numel() for p in system.laya.speed_head.parameters() if p.requires_grad)
+    aeb_params = sum(p.numel() for p in system.laya.aeb_head.parameters() if p.requires_grad)
+    traj_params = sum(p.numel() for p in system.laya.trajectory_head.parameters() if p.requires_grad)
+
+    assert proj_params == 3_954_446
+    assert maneuver_params == 33_412
+    assert speed_params == 33_412
+    assert aeb_params == 16_513
+    assert traj_params == 195_208
+    assert proj_params + maneuver_params + speed_params + aeb_params + traj_params == 4_232_991
+
+
+def test_compiled_pdf_artifacts_and_manuscript_integrity() -> None:
+    """Verify bilingual compiled PDF artifacts exist, are non-empty, and citations/parameters align."""
+    paper_dir = PROJECT_ROOT / "paper"
+    main_pdf = paper_dir / "main.pdf"
+    main_ko_pdf = paper_dir / "main_ko.pdf"
+    references_bib = paper_dir / "references.bib"
+
+    assert main_pdf.is_file(), f"Compiled PDF not found: {main_pdf}"
+    assert main_pdf.stat().st_size > 500_000, f"main.pdf is unexpectedly small: {main_pdf.stat().st_size} bytes"
+
+    assert main_ko_pdf.is_file(), f"Compiled Korean PDF not found: {main_ko_pdf}"
+    assert main_ko_pdf.stat().st_size > 500_000, f"main_ko.pdf is unexpectedly small: {main_ko_pdf.stat().st_size} bytes"
+
+    # Verify exactly 42 unique bibliography references
+    bib_text = references_bib.read_text(encoding="utf-8")
+    entries = [line for line in bib_text.splitlines() if line.strip().startswith("@")]
+    assert len(entries) == 42, f"Expected 42 bibliography entries, found {len(entries)}"
+
+    # Verify nocite{*} in both TeX sources
+    main_tex = (paper_dir / "main.tex").read_text(encoding="utf-8")
+    main_ko_tex = (paper_dir / "main_ko.tex").read_text(encoding="utf-8")
+    assert "\\nocite{*}" in main_tex
+    assert "\\nocite{*}" in main_ko_tex
+
+    # Verify Table 2 GT shield interventions typo fix: 1.32 /km
+    assert "1.32" in main_tex
+    assert "5.88" not in main_tex
+
+    # Verify speed levels {0, 20, 40, 65} in both papers and READMEs
+    assert "\\{0, 20, 40, 65\\}" in main_tex
+    assert "\\{0, 20, 40, 65\\}" in main_ko_tex
+
+    readme_en = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    readme_ko = (PROJECT_ROOT / "README.ko.md").read_text(encoding="utf-8")
+    assert "40" in readme_en and "65" in readme_en
+    assert "4,232,991" in readme_en and "4,232,991" in readme_ko
+
+
+def test_mock_pipeline_01_through_04_execution() -> None:
+    """Verify all 4 stages of the end-to-end pipeline run cleanly in mock mode with exit code 0."""
+    python_exe = sys.executable
+
+    # Stage 1: Data collection
+    res_01 = subprocess.run(
+        [python_exe, "scripts/01_collect_data.py", "--mock", "--num-frames", "5"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert res_01.returncode == 0, f"Stage 1 failed:\n{res_01.stderr}"
+    assert (PROJECT_ROOT / "data" / "metadata.jsonl").is_file()
+
+    # Stage 2: Projector training
+    res_02 = subprocess.run(
+        [python_exe, "scripts/02_train_projector.py", "--mock", "--epochs", "1", "--batch-size", "2"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert res_02.returncode == 0, f"Stage 2 failed:\n{res_02.stderr}"
+    assert (PROJECT_ROOT / "checkpoints" / "projector_best.pt").is_file()
+
+    # Stage 3: Calibration
+    res_03 = subprocess.run(
+        [python_exe, "scripts/03_calibrate.py", "--mock"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert res_03.returncode == 0, f"Stage 3 failed:\n{res_03.stderr}"
+    assert (PROJECT_ROOT / "checkpoints" / "temperature.pt").is_file()
+
+    # Stage 4: Simulation Evaluation
+    res_04 = subprocess.run(
+        [python_exe, "scripts/04_evaluate_sim.py", "--mock", "--episodes", "1", "--perception-mode", "vision_estimated"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert res_04.returncode == 0, f"Stage 4 failed:\n{res_04.stderr}"
+    assert (PROJECT_ROOT / "checkpoints" / "eval_metrics.json").is_file()
+
+
+def test_closed_loop_route_completion_vision_estimated_threshold() -> None:
+    """Verify closed-loop evaluation achieves >= 85.0% route completion under vision_estimated mode."""
+    eval_json = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
+    assert eval_json.is_file(), f"eval_metrics.json not found: {eval_json}"
+    with open(eval_json, "r", encoding="utf-8") as f:
+        metrics = json.load(f)
+
+    route_completion = float(metrics.get("route_completion_rate_pct", 0.0))
+    mean_latency = float(metrics.get("mean_latency_ms", 999.0))
+
+    assert route_completion >= 85.0, (
+        f"Route completion rate {route_completion:.1f}% is below target 85.0%"
+    )
+    assert mean_latency <= 40.0, (
+        f"Mean latency {mean_latency:.2f} ms exceeds real-time limit 40.0 ms"
+    )
+    assert metrics.get("targets_met", {}).get("route_completion_ge_85pct", False) is True
+
+
+def test_all_12_ablation_modes_execute_cleanly() -> None:
+    """Verify all 12 supported ablation modes in 04_evaluate_sim.py execute cleanly with exit code 0."""
+    python_exe = sys.executable
+    eval_json = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
+    saved_eval_bytes = eval_json.read_bytes() if eval_json.is_file() else None
+    ablation_modes = [
+        "full",
+        "mlp_head",
+        "small_transformer",
+        "random_laya",
+        "prompt_only",
+        "no_temporal",
+        "expert_rule_policy",
+        "rule_only",
+        "heuristic_fsm",
+        "ar_delay_300ms",
+        "autoregressive_vla",
+        "model_only",
+    ]
+
+    try:
+        for mode in ablation_modes:
+            res = subprocess.run(
+                [
+                    python_exe,
+                    "scripts/04_evaluate_sim.py",
+                    "--mock",
+                    "--episodes",
+                    "1",
+                    "--ablation-mode",
+                    mode,
+                ],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            assert res.returncode == 0, (
+                f"Ablation mode '{mode}' failed with returncode {res.returncode}:\n{res.stderr}"
+            )
+    finally:
+        if saved_eval_bytes is not None:
+            eval_json.write_bytes(saved_eval_bytes)
+
+
 if __name__ == "__main__":
-    test_decoupled_pedestrian_and_range_rate_heads()
-    print("[PASS] test_decoupled_pedestrian_and_range_rate_heads")
-    test_step_normalized_temporal_residual()
-    print("[PASS] test_step_normalized_temporal_residual")
-    test_5step_ols_variance_reduction_and_target_switch_reset()
-    print("[PASS] test_5step_ols_variance_reduction_and_target_switch_reset")
-    test_sustained_aeb_event_grouping()
-    print("[PASS] test_sustained_aeb_event_grouping")
-    test_cth_acc_and_bicycle_curvature_feedforward()
-    print("[PASS] test_cth_acc_and_bicycle_curvature_feedforward")
-    test_timestamp_aware_ols_under_frame_drops()
-    print("[PASS] test_timestamp_aware_ols_under_frame_drops")
-    test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis()
-    print("[PASS] test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis")
-    test_aeb_acc_crossover_regime_and_wet_friction_margin()
-    print("[PASS] test_aeb_acc_crossover_regime_and_wet_friction_margin")
-    test_holm_bonferroni_multiple_comparison_adjustment()
-    print("[PASS] test_holm_bonferroni_multiple_comparison_adjustment")
-    print("All 9 v10 verification tests passed successfully.")
+    _eval_json = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
+    _eval_carla_json = PROJECT_ROOT / "checkpoints" / "eval_metrics_carla.json"
+    _orig_eval = _eval_json.read_bytes() if _eval_json.is_file() else None
+    _orig_eval_carla = _eval_carla_json.read_bytes() if _eval_carla_json.is_file() else None
+    try:
+        test_decoupled_pedestrian_and_range_rate_heads()
+        print("[PASS] test_decoupled_pedestrian_and_range_rate_heads")
+        test_step_normalized_temporal_residual()
+        print("[PASS] test_step_normalized_temporal_residual")
+        test_5step_ols_variance_reduction_and_target_switch_reset()
+        print("[PASS] test_5step_ols_variance_reduction_and_target_switch_reset")
+        test_sustained_aeb_event_grouping()
+        print("[PASS] test_sustained_aeb_event_grouping")
+        test_cth_acc_and_bicycle_curvature_feedforward()
+        print("[PASS] test_cth_acc_and_bicycle_curvature_feedforward")
+        test_timestamp_aware_ols_under_frame_drops()
+        print("[PASS] test_timestamp_aware_ols_under_frame_drops")
+        test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis()
+        print("[PASS] test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis")
+        test_aeb_acc_crossover_regime_and_wet_friction_margin()
+        print("[PASS] test_aeb_acc_crossover_regime_and_wet_friction_margin")
+        test_holm_bonferroni_multiple_comparison_adjustment()
+        print("[PASS] test_holm_bonferroni_multiple_comparison_adjustment")
+        test_trainable_parameter_count_exact_invariant()
+        print("[PASS] test_trainable_parameter_count_exact_invariant")
+        test_compiled_pdf_artifacts_and_manuscript_integrity()
+        print("[PASS] test_compiled_pdf_artifacts_and_manuscript_integrity")
+        test_mock_pipeline_01_through_04_execution()
+        print("[PASS] test_mock_pipeline_01_through_04_execution")
+        test_closed_loop_route_completion_vision_estimated_threshold()
+        print("[PASS] test_closed_loop_route_completion_vision_estimated_threshold")
+        test_all_12_ablation_modes_execute_cleanly()
+        print("[PASS] test_all_12_ablation_modes_execute_cleanly")
+        print("All 14 verification tests passed successfully.")
+    finally:
+        if _orig_eval is not None:
+            _eval_json.write_bytes(_orig_eval)
+        if _orig_eval_carla is not None:
+            _eval_carla_json.write_bytes(_orig_eval_carla)
+

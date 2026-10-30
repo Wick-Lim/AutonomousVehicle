@@ -159,15 +159,23 @@ class SafetyShieldPID:
         raw_speed_level = int(decision.get("speed_level", 2))
         maneuver_conf = float(decision.get("maneuver_confidence", 1.0))
         aeb_prob = float(decision.get("emergency_brake", 0.0))
-        lead_distance_m = float(telemetry.get("lead_distance_m", 60.0))
+        lead_distance_m = float(
+            telemetry.get("lead_distance_m", telemetry.get("lead_distance", 60.0))
+        )
         lead_speed_kmh = float(telemetry.get("lead_speed_kmh", 60.0))
-        ped_distance_m = float(telemetry.get("pedestrian_distance_m", 100.0))
+        ped_distance_m = float(
+            telemetry.get(
+                "pedestrian_distance_m", telemetry.get("pedestrian_distance", 100.0)
+            )
+        )
         current_speed_kmh = float(telemetry.get("speed_kmh", 0.0))
         traffic_light = str(telemetry.get("traffic_light", "green"))
         hazard_source = str(telemetry.get("hazard_source", "none"))
         wet_road = bool(telemetry.get("wet_road", False))
-        a_max_mps2 = 4.5 if wet_road else float(telemetry.get("a_max_mps2", 6.0))
-        unc_margin_m = float(telemetry.get("uncertainty_margin_m", 0.0))
+        a_max_mps2 = float(telemetry.get("a_max_mps2", 4.5 if wet_road else 6.0))
+        unc_margin_m = float(
+            telemetry.get("uncertainty_margin_m", 1.8 if wet_road else 0.0)
+        )
         d_aeb_m = self.compute_kinematic_aeb_distance(
             current_speed_kmh,
             lead_speed_kmh,
@@ -188,7 +196,7 @@ class SafetyShieldPID:
                 shield_triggered = True
                 shield_reason = "model_aeb_only"
             target_speed_kmh = SPEED_LEVEL_KMH.get(gated_speed_level, 20.0)
-            if lead_distance_m < 38.0 and gated_speed_level > 0 and not self.use_mock:
+            if lead_distance_m < 38.0 and gated_speed_level > 0:
                 if self.stop_hold_active:
                     if lead_speed_kmh >= 3.5 or lead_distance_m >= 9.5:
                         self.stop_hold_active = False
@@ -279,7 +287,7 @@ class SafetyShieldPID:
         mpc_cornering_cap_kmh = float(
             min(65.0, 3.6 * np.sqrt(2.85 / max(effective_kappa, 1e-3)))
         )
-        if not self.use_mock and road_curv_abs > 0.22 and gated_speed_level > 0:
+        if road_curv_abs > 0.22 and gated_speed_level > 0:
             target_speed_kmh = min(target_speed_kmh, max(20.0, mpc_cornering_cap_kmh))
 
         if gated_maneuver == "follow_lead" and gated_speed_level >= 2:
@@ -290,46 +298,34 @@ class SafetyShieldPID:
             target_speed_kmh = min(target_speed_kmh, smooth_cap)
         if lead_distance_m < 38.0 and gated_speed_level > 0:
             lead_speed_kmh = float(telemetry.get("lead_speed_kmh", target_speed_kmh))
-            if not self.use_mock:
-                # Stop-and-Go hysteresis: hold full stop when lead < 2.0 km/h and d_lead <= 8.5 m;
-                # release only when lead >= 3.5 km/h or d_lead >= 9.5 m.
-                if self.stop_hold_active:
-                    if lead_speed_kmh >= 3.5 or lead_distance_m >= 9.5:
-                        self.stop_hold_active = False
-                elif lead_speed_kmh < 2.0 and lead_distance_m <= 8.5:
-                    self.stop_hold_active = True
+            # Stop-and-Go hysteresis: hold full stop when lead < 2.0 km/h and d_lead <= 8.5 m;
+            # release only when lead >= 3.5 km/h or d_lead >= 9.5 m.
+            if self.stop_hold_active:
+                if lead_speed_kmh >= 3.5 or lead_distance_m >= 9.5:
+                    self.stop_hold_active = False
+            elif lead_speed_kmh < 2.0 and lead_distance_m <= 8.5:
+                self.stop_hold_active = True
 
-                if self.stop_hold_active:
-                    target_speed_kmh = 0.0
-                else:
-                    # True Constant-Time-Headway (CTH) ACC down to 0 km/h: d*(v_ego) = d_0 + tau_h * (v_ego_kmh / 3.6)
-                    # With d_0 = 8.0 m, tau_h = 1.2 s (equals 16.0 m at v_ego = 24 km/h),
-                    # and proportional gain k_g = 0.85 (km/h)/m (equivalent to 0.236 s^-1 in SI units).
-                    d0_m = 8.0
-                    tau_h_s = 1.2
-                    kg_kmh_per_m = 0.85
-                    desired_gap_m = d0_m + tau_h_s * (current_speed_kmh / 3.6)
-                    gap_error_m = lead_distance_m - desired_gap_m
-                    acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
-                    acc_sync_speed = float(
-                        np.clip(
-                            lead_speed_kmh + kg_kmh_per_m * gap_error_m,
-                            0.0,
-                            acc_upper_kmh,
-                        )
-                    )
-                    target_speed_kmh = acc_sync_speed
+            if self.stop_hold_active:
+                target_speed_kmh = 0.0
             else:
-                v_ego = current_speed_kmh / 3.6
-                v_lead = lead_speed_kmh / 3.6
-                dv = max(0.0, v_ego - v_lead)
-                d_star = 10.0 + v_ego * 1.5 + (v_ego * dv) / (2.0 * 2.236)
-                if lead_distance_m < d_star * 1.15:
-                    safe_follow_speed = max(
+                # True Constant-Time-Headway (CTH) ACC down to 0 km/h: d*(v_ego) = d_0 + tau_h * (v_ego_kmh / 3.6)
+                # With d_0 = 8.0 m, tau_h = 1.2 s (equals 16.0 m at v_ego = 24 km/h),
+                # and proportional gain k_g = 0.85 (km/h)/m (equivalent to 0.236 s^-1 in SI units).
+                d0_m = 8.0
+                tau_h_s = 1.2
+                kg_kmh_per_m = 0.85
+                desired_gap_m = d0_m + tau_h_s * (current_speed_kmh / 3.6)
+                gap_error_m = lead_distance_m - desired_gap_m
+                acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
+                acc_sync_speed = float(
+                    np.clip(
+                        lead_speed_kmh + kg_kmh_per_m * gap_error_m,
                         0.0,
-                        min(lead_speed_kmh, (lead_distance_m - 7.5) * 1.8),
+                        acc_upper_kmh,
                     )
-                    target_speed_kmh = min(target_speed_kmh, safe_follow_speed)
+                )
+                target_speed_kmh = acc_sync_speed
 
         return {
             "raw_maneuver": raw_maneuver,

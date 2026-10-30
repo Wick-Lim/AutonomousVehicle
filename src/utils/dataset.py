@@ -54,8 +54,8 @@ class DrivingDataset(Dataset):
         emergency_brake = float(labels["emergency_brake"])
 
         # Build 6-waypoint (3.0s, dt=0.5s) ground-truth trajectory target [x_m, y_m, v_kmh]
-        speed_map = {0: 0.0, 1: 20.0, 2: 35.0, 3: 50.0}
-        v_tgt_kmh = 0.0 if emergency_brake >= 0.5 else float(speed_map.get(speed_level, 35.0))
+        speed_map = {0: 0.0, 1: 20.0, 2: 40.0, 3: 65.0}
+        v_tgt_kmh = 0.0 if emergency_brake >= 0.5 else float(speed_map.get(speed_level, 40.0))
         v_tgt_ms = v_tgt_kmh / 3.6
         lat_shift = 3.5 if maneuver_idx == 1 else (-3.5 if maneuver_idx == 2 else 0.0)
         gt_traj: List[List[float]] = []
