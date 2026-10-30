@@ -1,0 +1,17 @@
+[package]
+name = "autonomous_vehicle_rust"
+version = "0.1.0"
+edition = "2021"
+description = "Rust native control, safety shield, quintic spline, and timestamp-aware OLS core for AutonomousVehicle"
+
+[lib]
+name = "autonomous_vehicle_rust"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.20.3", features = ["extension-module"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

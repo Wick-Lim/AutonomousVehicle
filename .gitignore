@@ -43,3 +43,6 @@ Thumbs.db
 # Logs & temporary artifacts
 logs/
 *.log
+
+# Rust build artifacts
+rust_core/target/

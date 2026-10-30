@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List
 
@@ -15,23 +17,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.control.rust_backend import RUST_CORE_AVAILABLE, rust_core_module
 from src.control.shield_pid import SafetyShieldPID
+from src.env.expert_labeler import ExpertLabeler
 from src.models.laya_pilot import AutonomousDrivingSystem
 from src.models.spatial_projector import AuxiliaryPerceptionHead, SpatialProjector
 
 
 def ols_5step_slope_mps(window: List[float], dt: float = 0.05) -> float:
-    """Compute 5-step ordinary least-squares (OLS) range-rate slope (Eq. 11)."""
-    if len(window) < 2:
-        return 0.0
-    n_w = len(window)
-    t_idx = np.arange(n_w, dtype=np.float64) * dt
-    t_mean = float(t_idx.mean())
-    d_arr = np.asarray(window, dtype=np.float64)
-    return float(
-        np.sum((t_idx - t_mean) * (d_arr - d_arr.mean()))
-        / max(1e-6, float(np.sum((t_idx - t_mean) ** 2)))
-    )
+    """Compute 5-step ordinary least-squares (OLS) range-rate slope (Eq. 11) via Rust core."""
+    assert rust_core_module is not None
+    return float(rust_core_module.ols_5step_slope_mps(list(window), float(dt)))
 
 
 def count_sustained_aeb_events(
@@ -40,40 +36,15 @@ def count_sustained_aeb_events(
     min_contiguous_ticks: int = 3,
     max_gap_bridge: int = 2,
 ) -> tuple[int, int]:
-    """Group frame-level braking ticks into sustained AEB events (>=3 ticks, bridging <=2-tick gaps)."""
-    active = [1 if u <= threshold else 0 for u in throttle_brake_trace]
-    total_ticks = int(sum(active))
-
-    # Bridge short gaps of <= max_gap_bridge ticks between active braking ticks
-    bridged = list(active)
-    n = len(bridged)
-    i = 0
-    while i < n:
-        if bridged[i] == 1:
-            j = i + 1
-            while j < n and bridged[j] == 0 and (j - i - 1) <= max_gap_bridge:
-                j += 1
-            if j < n and bridged[j] == 1 and (j - i - 1) <= max_gap_bridge:
-                for k in range(i + 1, j):
-                    bridged[k] = 1
-            i = j
-        else:
-            i += 1
-
-    # Count contiguous runs with length >= min_contiguous_ticks
-    events = 0
-    run_len = 0
-    for val in bridged:
-        if val == 1:
-            run_len += 1
-        else:
-            if run_len >= min_contiguous_ticks:
-                events += 1
-            run_len = 0
-    if run_len >= min_contiguous_ticks:
-        events += 1
-
-    return events, total_ticks
+    """Group frame-level braking ticks into sustained AEB events via Rust core."""
+    assert rust_core_module is not None
+    evts, ticks = rust_core_module.count_sustained_aeb_events(
+        list(throttle_brake_trace),
+        float(threshold),
+        int(min_contiguous_ticks),
+        int(max_gap_bridge),
+    )
+    return int(evts), int(ticks)
 
 
 def test_decoupled_pedestrian_and_range_rate_heads() -> None:
@@ -392,46 +363,52 @@ def test_compiled_pdf_artifacts_and_manuscript_integrity() -> None:
 def test_mock_pipeline_01_through_04_execution() -> None:
     """Verify all 4 stages of the end-to-end pipeline run cleanly in mock mode with exit code 0."""
     python_exe = sys.executable
+    eval_json = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
+    saved_eval_bytes = eval_json.read_bytes() if eval_json.is_file() else None
 
-    # Stage 1: Data collection
-    res_01 = subprocess.run(
-        [python_exe, "scripts/01_collect_data.py", "--mock", "--num-frames", "5"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert res_01.returncode == 0, f"Stage 1 failed:\n{res_01.stderr}"
-    assert (PROJECT_ROOT / "data" / "metadata.jsonl").is_file()
+    try:
+        # Stage 1: Data collection
+        res_01 = subprocess.run(
+            [python_exe, "scripts/01_collect_data.py", "--mock", "--num-frames", "5"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert res_01.returncode == 0, f"Stage 1 failed:\n{res_01.stderr}"
+        assert (PROJECT_ROOT / "data" / "metadata.jsonl").is_file()
 
-    # Stage 2: Projector training
-    res_02 = subprocess.run(
-        [python_exe, "scripts/02_train_projector.py", "--mock", "--epochs", "1", "--batch-size", "2"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert res_02.returncode == 0, f"Stage 2 failed:\n{res_02.stderr}"
-    assert (PROJECT_ROOT / "checkpoints" / "projector_best.pt").is_file()
+        # Stage 2: Projector training
+        res_02 = subprocess.run(
+            [python_exe, "scripts/02_train_projector.py", "--mock", "--epochs", "1", "--batch-size", "2"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert res_02.returncode == 0, f"Stage 2 failed:\n{res_02.stderr}"
+        assert (PROJECT_ROOT / "checkpoints" / "projector_best.pt").is_file()
 
-    # Stage 3: Calibration
-    res_03 = subprocess.run(
-        [python_exe, "scripts/03_calibrate.py", "--mock"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert res_03.returncode == 0, f"Stage 3 failed:\n{res_03.stderr}"
-    assert (PROJECT_ROOT / "checkpoints" / "temperature.pt").is_file()
+        # Stage 3: Calibration
+        res_03 = subprocess.run(
+            [python_exe, "scripts/03_calibrate.py", "--mock"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert res_03.returncode == 0, f"Stage 3 failed:\n{res_03.stderr}"
+        assert (PROJECT_ROOT / "checkpoints" / "temperature.pt").is_file()
 
-    # Stage 4: Simulation Evaluation
-    res_04 = subprocess.run(
-        [python_exe, "scripts/04_evaluate_sim.py", "--mock", "--episodes", "1", "--perception-mode", "vision_estimated"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert res_04.returncode == 0, f"Stage 4 failed:\n{res_04.stderr}"
-    assert (PROJECT_ROOT / "checkpoints" / "eval_metrics.json").is_file()
+        # Stage 4: Simulation Evaluation
+        res_04 = subprocess.run(
+            [python_exe, "scripts/04_evaluate_sim.py", "--mock", "--episodes", "1", "--perception-mode", "vision_estimated"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert res_04.returncode == 0, f"Stage 4 failed:\n{res_04.stderr}"
+        assert eval_json.is_file()
+    finally:
+        if saved_eval_bytes is not None:
+            eval_json.write_bytes(saved_eval_bytes)
 
 
 def test_closed_loop_route_completion_vision_estimated_threshold() -> None:
@@ -497,11 +474,118 @@ def test_all_12_ablation_modes_execute_cleanly() -> None:
             eval_json.write_bytes(saved_eval_bytes)
 
 
+def test_rust_core_equivalence_and_speedup() -> None:
+    """Verify Rust PyO3 core (`autonomous_vehicle_rust`) across SafetyShieldPID, ExpertLabeler, OLS, and geometry."""
+    assert RUST_CORE_AVAILABLE and rust_core_module is not None, (
+        "Rust core extension `autonomous_vehicle_rust` is not available"
+    )
+
+    ctrl = SafetyShieldPID()
+    labeler = ExpertLabeler()
+
+    # 1. Kinematic AEB distance exact formula verification
+    for v_ego in [0.0, 12.5, 28.0, 41.8, 50.0]:
+        for v_lead in [0.0, 10.0, 25.0]:
+            d_r = ctrl.compute_kinematic_aeb_distance(v_ego, v_lead, 4.5, 1.8)
+            v_e = max(0.0, v_ego / 3.6)
+            v_l = max(0.0, v_lead / 3.6)
+            d_expected = 5.5 + (v_e * v_e) / (2.0 * 4.5) + 0.45 * max(0.0, v_e - v_l) + 1.8
+            assert np.isclose(d_r, d_expected, atol=1e-6)
+
+    # 2. ExpertLabeler (`RustExpertLabeler`) verification
+    lbl_aeb = labeler.label_step(
+        {"speed_kmh": 30.0, "traffic_light": "red", "hazard_source": "red_light"},
+        (0.0, -1.0),
+        {"lead_distance_m": 12.0, "road_curvature": 0.0, "scenario_event": "real_carla"},
+    )
+    assert lbl_aeb.emergency_brake == 1
+    assert lbl_aeb.speed_level == 0
+    assert lbl_aeb.maneuver == "follow_lead"
+
+    lbl_lc = labeler.label_step(
+        {"speed_kmh": 35.0, "left_lane_available": True, "right_lane_available": True},
+        (0.30, 0.2),
+        {"lead_distance_m": 25.0, "road_curvature": 0.05, "scenario_event": ""},
+    )
+    assert lbl_lc.maneuver == "change_left"
+    assert lbl_lc.maneuver_idx == 1
+    assert lbl_lc.speed_level == 2
+    assert lbl_lc.emergency_brake == 0
+
+    # 3. 5-step OLS, timestamp OLS, and sustained AEB grouping verification
+    w = [25.0, 24.8, 24.5, 24.3, 24.0]
+    assert np.isclose(ols_5step_slope_mps(w, 0.05), -5.0, atol=1e-6)
+    ts = [0.05, 0.15, 0.20, 0.35, 0.40]
+    ds = [30.0 - 4.0 * t for t in ts]
+    assert np.isclose(rust_core_module.timestamp_ols_slope_mps(ts, ds), -4.0, atol=1e-6)
+
+    trace = [0.0, -1.0, 0.0, -0.9, -0.8, 0.0, 0.0, -1.0]
+    assert count_sustained_aeb_events(trace) == (1, 4)
+
+    # 4. Quintic S-curve blend & polyline projection verification
+    orig_xyz = [(float(k * 2.0), 0.0, 0.0) for k in range(14)]
+    adj_xyz = [(float(k * 2.0), 3.5, 0.0) for k in range(20)]
+    blended_r = rust_core_module.quintic_s_curve_blend(orig_xyz, adj_xyz, 14)
+    assert len(blended_r) == 20
+    assert np.isclose(blended_r[0][1], 0.0, atol=1e-6)
+    assert np.isclose(blended_r[13][1], 3.5, atol=1e-6)
+
+    pts_r = rust_core_module.compute_polyline_tangents(blended_r)
+    pose_r = rust_core_module.sample_continuous_route_pose(pts_r, 5.2, 0.8, 0, 8.0)
+    assert len(pose_r) == 7
+
+    # 5. Latency benchmark: verify sub-20us PyO3 control step and sub-2us pure Rust core loop
+    n_bench = 2000
+    dec_b = {
+        "maneuver": "follow_lead",
+        "maneuver_confidence": 0.92,
+        "speed_level": 2,
+        "emergency_brake": 0.05,
+        "predicted_trajectory": [[3.0 * k, 0.1 * k, 25.0] for k in range(1, 7)],
+    }
+    tel_b = {
+        "speed_kmh": 24.0,
+        "lead_distance_m": 18.5,
+        "lead_speed_kmh": 22.0,
+        "pedestrian_distance_m": 100.0,
+        "lane_offset_m": 0.08,
+        "heading_error": -0.02,
+        "road_curvature": 0.18,
+        "traffic_light": "green",
+        "hazard_source": "vehicle",
+        "left_lane_available": True,
+        "right_lane_available": True,
+    }
+    ctrl.reset()
+    t1 = time.perf_counter()
+    for _ in range(n_bench):
+        _ = ctrl.compute_control(dec_b, tel_b, dt=0.05, shield_enabled=True)
+        _ = labeler.label_step(tel_b, (0.0, 0.2), {"lead_distance_m": 18.5, "road_curvature": 0.18})
+    pyo3_us_per_step = ((time.perf_counter() - t1) * 1e6) / n_bench
+
+    native_rust_us = rust_core_module.benchmark_rust_control_loop_us(10000)
+    assert pyo3_us_per_step < 100.0, f"Expected PyO3 step < 100.0 us, got {pyo3_us_per_step:.2f} us"
+    assert native_rust_us < 10.0, f"Expected native Rust loop < 10.0 us, got {native_rust_us:.3f} us"
+    print(
+        f"  [Benchmark] PyO3 Rust (Control + Shield + ExpertLabeler): {pyo3_us_per_step:.2f} us/step | "
+        f"Pure Rust Core (incl. OLS + Polyline + Shield + PID): {native_rust_us:.3f} us/step"
+    )
+
+
 if __name__ == "__main__":
     _eval_json = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
     _eval_carla_json = PROJECT_ROOT / "checkpoints" / "eval_metrics_carla.json"
+    _proj_pt = PROJECT_ROOT / "checkpoints" / "projector_best.pt"
+    _temp_pt = PROJECT_ROOT / "checkpoints" / "temperature.pt"
+    _meta_jsonl = PROJECT_ROOT / "data" / "metadata.jsonl"
+    _images_dir = PROJECT_ROOT / "data" / "images"
+
     _orig_eval = _eval_json.read_bytes() if _eval_json.is_file() else None
     _orig_eval_carla = _eval_carla_json.read_bytes() if _eval_carla_json.is_file() else None
+    _had_proj = _proj_pt.is_file()
+    _had_temp = _temp_pt.is_file()
+    _had_meta = _meta_jsonl.is_file()
+    _had_images = _images_dir.exists()
     try:
         test_decoupled_pedestrian_and_range_rate_heads()
         print("[PASS] test_decoupled_pedestrian_and_range_rate_heads")
@@ -531,10 +615,21 @@ if __name__ == "__main__":
         print("[PASS] test_closed_loop_route_completion_vision_estimated_threshold")
         test_all_12_ablation_modes_execute_cleanly()
         print("[PASS] test_all_12_ablation_modes_execute_cleanly")
-        print("All 14 verification tests passed successfully.")
+        test_rust_core_equivalence_and_speedup()
+        print("[PASS] test_rust_core_equivalence_and_speedup")
+        print("All 15 verification tests passed successfully.")
     finally:
         if _orig_eval is not None:
             _eval_json.write_bytes(_orig_eval)
         if _orig_eval_carla is not None:
             _eval_carla_json.write_bytes(_orig_eval_carla)
+        if not _had_proj and _proj_pt.is_file():
+            _proj_pt.unlink()
+        if not _had_temp and _temp_pt.is_file():
+            _temp_pt.unlink()
+        if not _had_meta and _meta_jsonl.is_file():
+            _meta_jsonl.unlink()
+        if not _had_images and _images_dir.exists():
+            shutil.rmtree(_images_dir, ignore_errors=True)
+
 

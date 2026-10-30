@@ -22,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.control.rust_backend import RUST_CORE_AVAILABLE, rust_core_module
 from src.control.shield_pid import SafetyShieldPID
 from src.env import create_driving_env
 from src.env.expert_labeler import ExpertLabeler
@@ -470,17 +471,13 @@ def main() -> None:
                 if len(lead_d_window) < 2:
                     dd_dt_reg = pred_rr_mps
                 else:
-                    t_idx = np.asarray([pt[0] for pt in lead_d_window], dtype=np.float64)
-                    d_arr = np.asarray([pt[1] for pt in lead_d_window], dtype=np.float64)
-                    t_span = float(t_idx[-1] - t_idx[0])
-                    if t_span < 1e-4:
-                        dd_dt_reg = 0.0
-                    else:
-                        t_mean = float(t_idx.mean())
-                        dd_dt_reg = float(
-                            np.sum((t_idx - t_mean) * (d_arr - d_arr.mean()))
-                            / max(1e-6, float(np.sum((t_idx - t_mean) ** 2)))
+                    assert rust_core_module is not None
+                    dd_dt_reg = float(
+                        rust_core_module.timestamp_ols_slope_mps(
+                            [pt[0] for pt in lead_d_window],
+                            [pt[1] for pt in lead_d_window],
                         )
+                    )
 
                 dd_dt_fused = 0.70 * dd_dt_reg + 0.30 * pred_rr_mps
                 raw_v_lead = ego_v_kmh + 3.6 * dd_dt_fused
