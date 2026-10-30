@@ -1,10 +1,11 @@
-"""Expert Labeler: Converts IDMPolicy physical actions and state into Laya decision labels."""
+"""Expert Labeler: Rust-accelerated (`PyO3`) translator from expert physical action + traffic state to Laya decision primitives."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
+from src.control.rust_backend import rust_core_module
 
 MANEUVER_OPTIONS: Tuple[str, ...] = (
     "keep_lane",
@@ -42,7 +43,7 @@ class ExpertLabels:
 
 
 class ExpertLabeler:
-    """Rule-based translator from expert physical action + traffic state to Laya decision primitives."""
+    """Rust-backed (`RustExpertLabeler`) translator from expert physical action + traffic state to Laya decision primitives."""
 
     def __init__(
         self,
@@ -52,11 +53,22 @@ class ExpertLabeler:
         follow_distance_thresh_m: float = 30.0,
         curve_curvature_thresh: float = 0.40,
     ) -> None:
-        self.lane_change_steer_thresh = lane_change_steer_thresh
-        self.aeb_decel_thresh = aeb_decel_thresh
-        self.aeb_distance_thresh_m = aeb_distance_thresh_m
-        self.follow_distance_thresh_m = follow_distance_thresh_m
-        self.curve_curvature_thresh = curve_curvature_thresh
+        if rust_core_module is None:
+            raise RuntimeError(
+                "Rust extension `autonomous_vehicle_rust` is required. Build `rust_core` with `cargo build --release`."
+            )
+        self.lane_change_steer_thresh = float(lane_change_steer_thresh)
+        self.aeb_decel_thresh = float(aeb_decel_thresh)
+        self.aeb_distance_thresh_m = float(aeb_distance_thresh_m)
+        self.follow_distance_thresh_m = float(follow_distance_thresh_m)
+        self.curve_curvature_thresh = float(curve_curvature_thresh)
+        self._rust_labeler = rust_core_module.RustExpertLabeler(
+            self.lane_change_steer_thresh,
+            self.aeb_decel_thresh,
+            self.aeb_distance_thresh_m,
+            self.follow_distance_thresh_m,
+            self.curve_curvature_thresh,
+        )
 
     def label_step(
         self,
@@ -64,82 +76,17 @@ class ExpertLabeler:
         expert_action: Tuple[float, float],
         info: Dict[str, Any],
     ) -> ExpertLabels:
-        """Derive ground-truth (maneuver, speed_level, emergency_brake) from expert step."""
-        steering, throttle_brake = float(expert_action[0]), float(expert_action[1])
-        speed_kmh = float(telemetry.get("speed_kmh", 0.0))
-        left_avail = bool(telemetry.get("left_lane_available", False))
-        right_avail = bool(telemetry.get("right_lane_available", False))
-        nav_command = str(telemetry.get("nav_command", "go_straight"))
-
-        lead_distance_m = float(info.get("lead_distance_m", telemetry.get("lead_distance_m", 60.0)))
-        road_curvature = abs(float(info.get("road_curvature", telemetry.get("road_curvature", 0.0))))
-        scenario_event = str(info.get("scenario_event", ""))
-        traffic_light = str(telemetry.get("traffic_light", info.get("traffic_light", "green")))
-        hazard_source = str(telemetry.get("hazard_source", info.get("hazard_source", "none")))
-
-        # 1. Determine emergency_brake (noul: 0 or 1) - includes CARLA red light & pedestrian crosswalk AEB
-        is_real_sim = scenario_event in ("real_metadrive", "real_carla")
-        is_aeb = (
-            scenario_event == "emergency_brake"
-            or traffic_light == "red"
-            or (hazard_source == "pedestrian" and lead_distance_m <= 16.0)
-            or (
-                not is_real_sim
-                and throttle_brake <= self.aeb_decel_thresh
-                and lead_distance_m <= self.aeb_distance_thresh_m
+        """Derive ground-truth (maneuver, speed_level, emergency_brake) via native Rust `RustExpertLabeler`."""
+        maneuver, maneuver_idx, speed_level, emergency_brake = (
+            self._rust_labeler.label_step(
+                telemetry,
+                (float(expert_action[0]), float(expert_action[1])),
+                info,
             )
-            or (lead_distance_m < 9.5 and speed_kmh > 15.0)
         )
-        emergency_brake = 1 if is_aeb else 0
-
-        # 2. Determine maneuver (choice: keep_lane, change_left, change_right, follow_lead)
-        expert_maneuver = info.get("expert_maneuver") or telemetry.get("expert_maneuver")
-        if scenario_event in MANEUVER_TO_IDX:
-            maneuver = scenario_event
-        elif expert_maneuver in ("change_left", "change_right"):
-            maneuver = expert_maneuver
-        elif is_aeb:
-            maneuver = "follow_lead"
-        elif (
-            not is_real_sim
-            and steering >= self.lane_change_steer_thresh
-            and left_avail
-            and road_curvature < self.curve_curvature_thresh
-        ):
-            maneuver = "change_left"
-        elif (
-            not is_real_sim
-            and steering <= -self.lane_change_steer_thresh
-            and right_avail
-            and road_curvature < self.curve_curvature_thresh
-        ):
-            maneuver = "change_right"
-        elif lead_distance_m <= self.follow_distance_thresh_m:
-            maneuver = "follow_lead"
-        else:
-            maneuver = "keep_lane"
-
-        maneuver_idx = MANEUVER_TO_IDX[maneuver]
-
-        # 3. Determine speed_level (score: 0=0km/h, 1=20km/h, 2=40km/h, 3=65km/h)
-        if emergency_brake == 1:
-            speed_level = 0
-        elif scenario_event == "sharp_curve" or road_curvature >= self.curve_curvature_thresh:
-            speed_level = 1
-        elif (
-            maneuver in ("change_left", "change_right", "follow_lead")
-            or nav_command in ("merge", "turn_left", "turn_right")
-            or road_curvature >= 0.22
-        ):
-            speed_level = 2 if lead_distance_m > 16.0 else 1
-        elif lead_distance_m >= 45.0 and road_curvature < 0.22:
-            speed_level = 3
-        else:
-            speed_level = 2
-
         return ExpertLabels(
-            maneuver=maneuver,
-            maneuver_idx=maneuver_idx,
-            speed_level=speed_level,
-            emergency_brake=emergency_brake,
+            maneuver=str(maneuver),
+            maneuver_idx=int(maneuver_idx),
+            speed_level=int(speed_level),
+            emergency_brake=int(emergency_brake),
         )

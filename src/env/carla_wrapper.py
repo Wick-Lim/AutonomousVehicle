@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from src.control.rust_backend import RUST_CORE_AVAILABLE, rust_core_module
 from src.env.metadrive_wrapper import NAV_COMMANDS, TelemetryState
 
 FSD_SCENARIO_NAMES: Tuple[str, ...] = (
@@ -367,23 +368,9 @@ class CarlaWrapper:
     def _compute_polyline_tangents(
         xyz_list: List[Tuple[float, float, float]]
     ) -> List[Tuple[float, float, float, float]]:
-        """Attach continuous forward tangent yaw_rad to a list of (x, y, z) 3D points."""
-        n = len(xyz_list)
-        if n == 0:
-            return []
-        pts: List[Tuple[float, float, float, float]] = []
-        for i in range(n):
-            x, y, z = xyz_list[i]
-            if i + 1 < n:
-                nx, ny, _ = xyz_list[i + 1]
-                yaw = math.atan2(ny - y, nx - x)
-            elif i > 0:
-                px, py, _ = xyz_list[i - 1]
-                yaw = math.atan2(y - py, x - px)
-            else:
-                yaw = 0.0
-            pts.append((float(x), float(y), float(z), float(yaw)))
-        return pts
+        """Attach continuous forward tangent yaw_rad to a list of (x, y, z) 3D points via Rust core."""
+        assert rust_core_module is not None
+        return list(rust_core_module.compute_polyline_tangents(xyz_list))
 
     def _rebuild_route_pts(self) -> None:
         """Build continuous 3D polyline `self._route_pts` from `self._route_waypoints`."""
@@ -434,20 +421,26 @@ class CarlaWrapper:
         prefix_xyz = [
             (p[0], p[1], p[2]) for p in getattr(self, "_route_pts", [])[:start_idx]
         ]
-        blended_xyz: List[Tuple[float, float, float]] = []
-        for k in range(len(adj_chain)):
-            al = adj_chain[k].transform.location
-            if k < n_blend:
-                ol = orig_chain[k].transform.location
-                tau = float(k) / float(max(1, n_blend - 1))
-                # Minimum-jerk quintic polynomial: s(tau) = 10*tau^3 - 15*tau^4 + 6*tau^5
-                s = (tau**3) * (10.0 + tau * (-15.0 + 6.0 * tau))
-                bx = (1.0 - s) * float(ol.x) + s * float(al.x)
-                by = (1.0 - s) * float(ol.y) + s * float(al.y)
-                bz = (1.0 - s) * float(ol.z) + s * float(al.z)
-                blended_xyz.append((bx, by, bz))
-            else:
-                blended_xyz.append((float(al.x), float(al.y), float(al.z)))
+        assert rust_core_module is not None
+        orig_xyz = [
+            (
+                float(w.transform.location.x),
+                float(w.transform.location.y),
+                float(w.transform.location.z),
+            )
+            for w in orig_chain[:n_blend]
+        ]
+        adj_xyz = [
+            (
+                float(w.transform.location.x),
+                float(w.transform.location.y),
+                float(w.transform.location.z),
+            )
+            for w in adj_chain
+        ]
+        blended_xyz = list(
+            rust_core_module.quintic_s_curve_blend(orig_xyz, adj_xyz, n_blend)
+        )
 
         self._route_pts = self._compute_polyline_tangents(prefix_xyz + blended_xyz)
         self._route_waypoints = list(self._route_waypoints[:start_idx]) + adj_chain
@@ -463,61 +456,19 @@ class CarlaWrapper:
         start_idx: int,
         lookahead_m: float = 8.0,
     ) -> Tuple[int, float, float, float, float, float, float]:
-        """Project (x, y) onto `self._route_pts` and interpolate a continuous lookahead point.
+        """Project (x, y) onto `self._route_pts` and interpolate a continuous lookahead point via Rust core.
 
         Returns `(best_idx, proj_x, proj_y, proj_yaw, look_x, look_y, ref_yaw)`.
         """
         pts = getattr(self, "_route_pts", [])
         if not pts:
             return 0, x, y, 0.0, x + lookahead_m, y, 0.0
-        n = len(pts)
-        best_i = min(max(0, start_idx), n - 1)
-        best_d = 1e9
-        end_i = min(n, best_i + 12)
-        for idx in range(best_i, end_i):
-            d = math.hypot(x - pts[idx][0], y - pts[idx][1])
-            if d < best_d:
-                best_d = d
-                best_i = idx
-
-        # Continuous projection onto segment [best_i -> best_i + 1]
-        if best_i + 1 < n:
-            x0, y0, _, yaw0 = pts[best_i]
-            x1, y1, _, _ = pts[best_i + 1]
-            vx, vy = x1 - x0, y1 - y0
-            seg_len_sq = vx * vx + vy * vy
-            t_seg = (
-                float(np.clip(((x - x0) * vx + (y - y0) * vy) / seg_len_sq, 0.0, 1.0))
-                if seg_len_sq > 1e-4
-                else 0.0
+        assert rust_core_module is not None
+        return tuple(  # type: ignore[return-value]
+            rust_core_module.sample_continuous_route_pose(
+                pts, float(x), float(y), max(0, int(start_idx)), float(lookahead_m)
             )
-            proj_x = x0 + t_seg * vx
-            proj_y = y0 + t_seg * vy
-            proj_yaw = yaw0
-        else:
-            proj_x, proj_y, _, proj_yaw = pts[best_i]
-            t_seg = 0.0
-
-        # Walk continuously along polyline from (proj_x, proj_y) by `lookahead_m`
-        rem = lookahead_m
-        cx, cy = proj_x, proj_y
-        curr_idx = best_i
-        look_x, look_y = pts[-1][0], pts[-1][1]
-        while curr_idx + 1 < n:
-            nx, ny, _, _ = pts[curr_idx + 1]
-            ds = math.hypot(nx - cx, ny - cy)
-            if ds >= rem and ds > 1e-4:
-                ratio = rem / ds
-                look_x = cx + ratio * (nx - cx)
-                look_y = cy + ratio * (ny - cy)
-                break
-            rem -= ds
-            cx, cy = nx, ny
-            curr_idx += 1
-            look_x, look_y = cx, cy
-
-        ref_yaw = math.atan2(look_y - proj_y, look_x - proj_x)
-        return best_i, proj_x, proj_y, proj_yaw, look_x, look_y, ref_yaw
+        )
 
     def _step_fsd4_lead_vehicle(self) -> None:
         """Actively drive the ACC/Stop-and-Go lead vehicle along the route (FSD-4, FSD-6, FSD-10)."""

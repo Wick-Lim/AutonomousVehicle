@@ -1,13 +1,11 @@
-"""Safety Shield & Lateral/Longitudinal PID Controllers (Calibrated Safety Gating)."""
+"""Safety Shield & Lateral/Longitudinal PID Controllers backed by native Rust (`PyO3`)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-import numpy as np
-
-from src.env.expert_labeler import SPEED_LEVEL_KMH
+from src.control.rust_backend import rust_core_module
 
 
 @dataclass
@@ -19,57 +17,64 @@ class PIDGains:
 
 
 class ScalarPID:
-    """Discrete-time PID controller with anti-windup clamping."""
+    """Discrete-time PID controller with anti-windup clamping backed by `RustScalarPID`."""
 
     def __init__(self, gains: PIDGains) -> None:
+        if rust_core_module is None:
+            raise RuntimeError(
+                "Rust extension `autonomous_vehicle_rust` is required. Build `rust_core` with `cargo build --release`."
+            )
         self.gains = gains
-        self.integral: float = 0.0
-        self.prev_error: Optional[float] = None
+        self._rust_pid = rust_core_module.RustScalarPID(
+            float(gains.kp),
+            float(gains.ki),
+            float(gains.kd),
+            float(gains.integral_limit),
+        )
+
+    @property
+    def integral(self) -> float:
+        return float(self._rust_pid.integral)
+
+    @integral.setter
+    def integral(self, val: float) -> None:
+        self._rust_pid.integral = float(val)
+
+    @property
+    def prev_error(self) -> Optional[float]:
+        return self._rust_pid.prev_error
+
+    @prev_error.setter
+    def prev_error(self, val: Optional[float]) -> None:
+        self._rust_pid.prev_error = None if val is None else float(val)
 
     def reset(self) -> None:
-        self.integral = 0.0
-        self.prev_error = None
+        self._rust_pid.reset()
 
     def step(self, error: float, dt: float = 0.05) -> float:
-        # Suppress derivative spike when crossing discrete lane boundary
-        if self.prev_error is not None and abs(error - self.prev_error) > 1.2:
-            derivative = 0.0
-            self.integral = 0.0
-        else:
-            self.integral = float(
-                np.clip(
-                    self.integral + error * dt,
-                    -self.gains.integral_limit,
-                    self.gains.integral_limit,
-                )
-            )
-            derivative = (
-                0.0
-                if self.prev_error is None
-                else (error - self.prev_error) / max(1e-4, dt)
-            )
-        self.prev_error = error
-        return (
-            self.gains.kp * error
-            + self.gains.ki * self.integral
-            + self.gains.kd * derivative
-        )
+        return float(self._rust_pid.step(float(error), float(dt)))
 
 
 class SafetyShieldPID:
-    """Calibrated Safety Gating Shield + Lateral/Longitudinal PID Controller.
+    """Calibrated Safety Gating Shield + Lateral/Longitudinal PID Controller backed by `RustSafetyShieldPID`.
 
-    Enforces Section 3.3 Safety Gating Policy:
-      - Rule 1 (AEB Priority): If `emergency_brake >= 0.70`, override all maneuvers and
-        immediately execute maximum braking (`throttle_brake = -1.0`).
+    Enforces Section 3.3 Safety Gating Policy in native Rust (`autonomous_vehicle_rust`):
+      - Rule 1 (AEB Priority): If `emergency_brake >= 0.70`, red light/pedestrian, or kinematic closing-rate AEB,
+        override all maneuvers and immediately execute maximum braking (`throttle_brake = -1.0`).
       - Rule 2 (Confidence Fallback): If `maneuver_confidence < 0.80`, reject any lane-change
         command (`change_left` / `change_right`), force `keep_lane`, and step down
-        `speed_level` by 1 level (`max(0, speed_level - 1)`).
+        `speed_level` by 1 level (`max(1, speed_level - 1)`).
     """
 
     def __init__(
-        self, config: Optional[Dict[str, Any]] = None, use_mock: bool = False
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        use_mock: bool = False,
     ) -> None:
+        if rust_core_module is None:
+            raise RuntimeError(
+                "Rust extension `autonomous_vehicle_rust` is required. Build `rust_core` with `cargo build --release`."
+            )
         cfg = config or {}
         ctrl_cfg = cfg.get("control", {})
         shield_cfg = ctrl_cfg.get("safety_shield", {})
@@ -92,34 +97,64 @@ class SafetyShieldPID:
         self.steer_smoothing_alpha: float = float(
             lat_cfg.get("steer_smoothing_alpha", 0.72)
         )
-        self.current_steering: float = 0.0
-        self.current_throttle_brake: float = 0.0
         self.current_target_offset_m: float = 0.0
-        self.stop_hold_active: bool = False
 
-        self.lateral_pid = ScalarPID(
-            PIDGains(
-                kp=float(lat_cfg.get("kp", 0.45)),
-                ki=float(lat_cfg.get("ki", 0.01)),
-                kd=float(lat_cfg.get("kd", 0.18)),
-            )
+        lat_kp = float(lat_cfg.get("kp", 0.45))
+        lat_ki = float(lat_cfg.get("ki", 0.01))
+        lat_kd = float(lat_cfg.get("kd", 0.18))
+        lon_kp = float(lon_cfg.get("kp", 0.08))
+        lon_ki = float(lon_cfg.get("ki", 0.005))
+        lon_kd = float(lon_cfg.get("kd", 0.02))
+
+        self.lateral_pid = ScalarPID(PIDGains(kp=lat_kp, ki=lat_ki, kd=lat_kd))
+        self.longitudinal_pid = ScalarPID(PIDGains(kp=lon_kp, ki=lon_ki, kd=lon_kd))
+
+        self._rust_shield = rust_core_module.RustSafetyShieldPID(
+            self.use_mock,
+            self.aeb_threshold,
+            self.confidence_threshold,
+            self.lane_width,
+            self.heading_weight,
+            self.max_steer_rate_per_sec,
+            self.steer_smoothing_alpha,
+            lat_kp,
+            lat_ki,
+            lat_kd,
+            lon_kp,
+            lon_ki,
+            lon_kd,
         )
-        self.longitudinal_pid = ScalarPID(
-            PIDGains(
-                kp=float(lon_cfg.get("kp", 0.08)),
-                ki=float(lon_cfg.get("ki", 0.005)),
-                kd=float(lon_cfg.get("kd", 0.02)),
-            )
-        )
+
+    @property
+    def stop_hold_active(self) -> bool:
+        return bool(self._rust_shield.stop_hold_active)
+
+    @stop_hold_active.setter
+    def stop_hold_active(self, val: bool) -> None:
+        self._rust_shield.stop_hold_active = bool(val)
+
+    @property
+    def current_steering(self) -> float:
+        return float(self._rust_shield.current_steering)
+
+    @current_steering.setter
+    def current_steering(self, val: float) -> None:
+        self._rust_shield.current_steering = float(val)
+
+    @property
+    def current_throttle_brake(self) -> float:
+        return float(self._rust_shield.current_throttle_brake)
+
+    @current_throttle_brake.setter
+    def current_throttle_brake(self, val: float) -> None:
+        self._rust_shield.current_throttle_brake = float(val)
 
     def reset(self) -> None:
         """Reset PID controller internal states at episode start."""
         self.lateral_pid.reset()
         self.longitudinal_pid.reset()
-        self.current_steering = 0.0
-        self.current_throttle_brake = 0.0
         self.current_target_offset_m = 0.0
-        self.stop_hold_active = False
+        self._rust_shield.reset()
 
     @staticmethod
     def compute_kinematic_aeb_distance(
@@ -128,24 +163,15 @@ class SafetyShieldPID:
         a_max_mps2: float = 6.0,
         uncertainty_margin_m: float = 0.0,
     ) -> float:
-        """Velocity-, friction-, and closing-rate-dependent AEB boundary d_AEB(v_ego, v_lead).
-
-        d_AEB = 5.5 + v_ego^2 / (2 * a_max) + tau_react * max(0, v_ego - v_lead) + delta_unc
-        with dry a_max = 6.0 m/s^2 (wet a_max = 4.5 m/s^2) and tau_react = 0.45 s:
-          - Regime 1 (Non-overlap): d_AEB < d*(v_ego) = 8.0 + 1.2 * v_ego for all v_ego in [0, 50] km/h
-            when closing speed Delta_v <= 6 km/h, and for v_ego < 41.8 km/h (11.61 m/s) when v_lead = 0.
-          - Regime 2 (Intentional AEB Preemption): For v_ego >= 41.8 km/h approaching a stationary lead
-            (e.g., d_AEB(50, 0) = 27.83 m > d*(50) = 24.67 m), Rule 1 AEB intentionally overrides CTH-ACC.
-        """
-        v_ego_mps = max(0.0, current_speed_kmh / 3.6)
-        v_lead_mps = max(0.0, lead_speed_kmh / 3.6)
-        closing_mps = max(0.0, v_ego_mps - v_lead_mps)
-        eff_a_max = max(2.5, float(a_max_mps2))
+        """Velocity-, friction-, and closing-rate-dependent AEB boundary d_AEB(v_ego, v_lead) via Rust core."""
+        assert rust_core_module is not None
         return float(
-            5.5
-            + (v_ego_mps * v_ego_mps) / (2.0 * eff_a_max)
-            + 0.45 * closing_mps
-            + float(uncertainty_margin_m)
+            rust_core_module.compute_kinematic_aeb_distance(
+                float(current_speed_kmh),
+                float(lead_speed_kmh),
+                float(a_max_mps2),
+                float(uncertainty_margin_m),
+            )
         )
 
     def apply_safety_shield(
@@ -154,212 +180,38 @@ class SafetyShieldPID:
         telemetry: Dict[str, Any],
         shield_enabled: bool = True,
     ) -> Dict[str, Any]:
-        """Apply calibrated safety gating rules to Laya's raw decision output."""
-        raw_maneuver = str(decision.get("maneuver", "keep_lane"))
-        raw_speed_level = int(decision.get("speed_level", 2))
-        maneuver_conf = float(decision.get("maneuver_confidence", 1.0))
-        aeb_prob = float(decision.get("emergency_brake", 0.0))
-        lead_distance_m = float(
-            telemetry.get("lead_distance_m", telemetry.get("lead_distance", 60.0))
-        )
-        lead_speed_kmh = float(telemetry.get("lead_speed_kmh", 60.0))
-        ped_distance_m = float(
-            telemetry.get(
-                "pedestrian_distance_m", telemetry.get("pedestrian_distance", 100.0)
+        """Apply calibrated safety gating rules to Laya's raw decision output via Rust core."""
+        return dict(
+            self._rust_shield.apply_safety_shield(
+                decision, telemetry, bool(shield_enabled)
             )
         )
-        current_speed_kmh = float(telemetry.get("speed_kmh", 0.0))
-        traffic_light = str(telemetry.get("traffic_light", "green"))
-        hazard_source = str(telemetry.get("hazard_source", "none"))
-        wet_road = bool(telemetry.get("wet_road", False))
-        a_max_mps2 = float(telemetry.get("a_max_mps2", 4.5 if wet_road else 6.0))
-        unc_margin_m = float(
-            telemetry.get("uncertainty_margin_m", 1.8 if wet_road else 0.0)
-        )
-        d_aeb_m = self.compute_kinematic_aeb_distance(
-            current_speed_kmh,
-            lead_speed_kmh,
-            a_max_mps2=a_max_mps2,
-            uncertainty_margin_m=unc_margin_m,
-        )
-
-        gated_maneuver = raw_maneuver
-        gated_speed_level = raw_speed_level
-        shield_triggered = False
-        shield_reason = "none"
-
-        if not shield_enabled:
-            # Model-Only Mode (Safety Shield OFF): only Laya's predicted AEB probability triggers emergency brake
-            if aeb_prob >= self.aeb_threshold:
-                gated_maneuver = "keep_lane"
-                gated_speed_level = 0
-                shield_triggered = True
-                shield_reason = "model_aeb_only"
-            target_speed_kmh = SPEED_LEVEL_KMH.get(gated_speed_level, 20.0)
-            if lead_distance_m < 38.0 and gated_speed_level > 0:
-                if self.stop_hold_active:
-                    if lead_speed_kmh >= 3.5 or lead_distance_m >= 9.5:
-                        self.stop_hold_active = False
-                elif lead_speed_kmh < 2.0 and lead_distance_m <= 8.5:
-                    self.stop_hold_active = True
-
-                if self.stop_hold_active:
-                    target_speed_kmh = 0.0
-                else:
-                    desired_gap_m = 8.0 + 1.2 * (current_speed_kmh / 3.6)
-                    gap_error_m = lead_distance_m - desired_gap_m
-                    acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
-                    target_speed_kmh = float(
-                        np.clip(lead_speed_kmh + 0.85 * gap_error_m, 0.0, acc_upper_kmh)
-                    )
-            return {
-                "raw_maneuver": raw_maneuver,
-                "raw_speed_level": raw_speed_level,
-                "maneuver": gated_maneuver,
-                "speed_level": gated_speed_level,
-                "target_speed_kmh": target_speed_kmh,
-                "mpc_cornering_cap_kmh": 65.0,
-                "maneuver_confidence": maneuver_conf,
-                "emergency_brake": aeb_prob,
-                "shield_triggered": shield_triggered,
-                "shield_reason": shield_reason,
-                "blind_spot_left": bool(telemetry.get("blind_spot_left", False)),
-                "blind_spot_right": bool(telemetry.get("blind_spot_right", False)),
-            }
-
-        # Rule 1: Emergency Brake Priority (emergency_brake >= 0.70, red light/pedestrian, or kinematic closing-rate AEB)
-        if (
-            aeb_prob >= self.aeb_threshold
-            or traffic_light == "red"
-            or ped_distance_m <= 16.0
-            or (hazard_source == "pedestrian" and lead_distance_m <= 16.0)
-            or (
-                lead_distance_m <= d_aeb_m
-                and current_speed_kmh > max(6.0, lead_speed_kmh + 6.0)
-            )
-        ):
-            gated_maneuver = "keep_lane"
-            gated_speed_level = 0
-            shield_triggered = True
-            shield_reason = "rule1_emergency_brake"
-        else:
-            # Rule 2: Low Confidence Fallback (maneuver_confidence < 0.80)
-            if maneuver_conf < self.confidence_threshold:
-                if raw_maneuver in ("change_left", "change_right"):
-                    gated_maneuver = "keep_lane"
-                gated_speed_level = (
-                    max(1, raw_speed_level - 1) if raw_speed_level > 0 else 0
-                )
-                shield_triggered = True
-                shield_reason = "rule2_low_confidence_fallback"
-
-            # Physical boundary guard: block lane change if target lane does not exist
-            if gated_maneuver == "change_left" and not bool(
-                telemetry.get("left_lane_available", True)
-            ):
-                gated_maneuver = "keep_lane"
-                shield_triggered = True
-                shield_reason = "boundary_left_unavailable"
-            elif gated_maneuver == "change_right" and not bool(
-                telemetry.get("right_lane_available", True)
-            ):
-                gated_maneuver = "keep_lane"
-                shield_triggered = True
-                shield_reason = "boundary_right_unavailable"
-            # 360-Degree Surround Blind-Spot Interlock: block lane change if adjacent rear/side zone is occupied
-            elif gated_maneuver == "change_left" and bool(
-                telemetry.get("blind_spot_left", False)
-            ):
-                gated_maneuver = "keep_lane"
-                shield_triggered = True
-                shield_reason = "blindspot_left_occupied"
-            elif gated_maneuver == "change_right" and bool(
-                telemetry.get("blind_spot_right", False)
-            ):
-                gated_maneuver = "keep_lane"
-                shield_triggered = True
-                shield_reason = "blindspot_right_occupied"
-
-        target_speed_kmh = SPEED_LEVEL_KMH.get(gated_speed_level, 20.0)
-        # Curvature-coupled cornering speed regulation: v_max(kappa) = sqrt(a_lat_max / max(|kappa|, 1e-3))
-        road_curv_abs = abs(float(telemetry.get("road_curvature", 0.0)))
-        effective_kappa = road_curv_abs * 0.065
-        mpc_cornering_cap_kmh = float(
-            min(65.0, 3.6 * np.sqrt(2.85 / max(effective_kappa, 1e-3)))
-        )
-        if road_curv_abs > 0.22 and gated_speed_level > 0:
-            target_speed_kmh = min(target_speed_kmh, max(20.0, mpc_cornering_cap_kmh))
-
-        if gated_maneuver == "follow_lead" and gated_speed_level >= 2:
-            target_speed_kmh = min(target_speed_kmh, 30.0)
-        if lead_distance_m < 52.0 and gated_speed_level > 0:
-            # Smoothly harmonize with MetaDrive traffic flow (30 km/h) as lead vehicle approaches
-            smooth_cap = 30.0 + max(0.0, lead_distance_m - 30.0) * 1.4
-            target_speed_kmh = min(target_speed_kmh, smooth_cap)
-        if lead_distance_m < 38.0 and gated_speed_level > 0:
-            lead_speed_kmh = float(telemetry.get("lead_speed_kmh", target_speed_kmh))
-            # Stop-and-Go hysteresis: hold full stop when lead < 2.0 km/h and d_lead <= 8.5 m;
-            # release only when lead >= 3.5 km/h or d_lead >= 9.5 m.
-            if self.stop_hold_active:
-                if lead_speed_kmh >= 3.5 or lead_distance_m >= 9.5:
-                    self.stop_hold_active = False
-            elif lead_speed_kmh < 2.0 and lead_distance_m <= 8.5:
-                self.stop_hold_active = True
-
-            if self.stop_hold_active:
-                target_speed_kmh = 0.0
-            else:
-                # True Constant-Time-Headway (CTH) ACC down to 0 km/h: d*(v_ego) = d_0 + tau_h * (v_ego_kmh / 3.6)
-                # With d_0 = 8.0 m, tau_h = 1.2 s (equals 16.0 m at v_ego = 24 km/h),
-                # and proportional gain k_g = 0.85 (km/h)/m (equivalent to 0.236 s^-1 in SI units).
-                d0_m = 8.0
-                tau_h_s = 1.2
-                kg_kmh_per_m = 0.85
-                desired_gap_m = d0_m + tau_h_s * (current_speed_kmh / 3.6)
-                gap_error_m = lead_distance_m - desired_gap_m
-                acc_upper_kmh = min(35.0, lead_speed_kmh + 6.0)
-                acc_sync_speed = float(
-                    np.clip(
-                        lead_speed_kmh + kg_kmh_per_m * gap_error_m,
-                        0.0,
-                        acc_upper_kmh,
-                    )
-                )
-                target_speed_kmh = acc_sync_speed
-
-        return {
-            "raw_maneuver": raw_maneuver,
-            "raw_speed_level": raw_speed_level,
-            "maneuver": gated_maneuver,
-            "speed_level": gated_speed_level,
-            "target_speed_kmh": target_speed_kmh,
-            "mpc_cornering_cap_kmh": round(mpc_cornering_cap_kmh, 1),
-            "maneuver_confidence": maneuver_conf,
-            "emergency_brake": aeb_prob,
-            "shield_triggered": shield_triggered,
-            "shield_reason": shield_reason,
-            "blind_spot_left": bool(telemetry.get("blind_spot_left", False)),
-            "blind_spot_right": bool(telemetry.get("blind_spot_right", False)),
-        }
 
     def compute_mpc_feedforward(
         self,
         decision: Dict[str, Any],
         telemetry: Dict[str, Any],
     ) -> float:
-        """Compute Kinematic Bicycle MPC feedforward steering command (wheelbase L = 2.85m)."""
-        wheelbase_m = 2.85
+        """Compute Kinematic Bicycle MPC feedforward steering command (wheelbase L = 2.85m) via Rust core."""
+        assert rust_core_module is not None
         road_curv = float(telemetry.get("road_curvature", 0.0))
+        lane_offset_m = float(telemetry.get("lane_offset_m", 0.0))
         pred_traj = decision.get("predicted_trajectory")
-        traj_curv = 0.0
         if isinstance(pred_traj, list) and len(pred_traj) >= 3:
-            # Lookahead waypoint k=2 (t = 1.5s) in ego coordinates (x_fwd, y_left)
-            lx = max(3.5, float(pred_traj[2][0]))
-            ly = float(pred_traj[2][1]) - float(telemetry.get("lane_offset_m", 0.0))
-            traj_curv = (2.0 * ly) / (lx * lx + ly * ly)
-        eff_curv = 0.70 * (-road_curv * 0.045) + 0.30 * traj_curv
-        delta_rad = float(np.arctan(wheelbase_m * eff_curv))
-        return float(np.clip(delta_rad / 0.70, -0.35, 0.35))
+            return float(
+                rust_core_module.compute_mpc_feedforward(
+                    road_curv,
+                    lane_offset_m,
+                    float(pred_traj[2][0]),
+                    float(pred_traj[2][1]),
+                    True,
+                )
+            )
+        return float(
+            rust_core_module.compute_mpc_feedforward(
+                road_curv, lane_offset_m, 0.0, 0.0, False
+            )
+        )
 
     def compute_control(
         self,
@@ -368,98 +220,20 @@ class SafetyShieldPID:
         dt: float = 0.05,
         shield_enabled: bool = True,
     ) -> Tuple[Tuple[float, float], Dict[str, Any]]:
-        """Compute physical control [steering, throttle_brake] in [-1.0, 1.0]."""
-        gated = self.apply_safety_shield(decision, telemetry, shield_enabled=shield_enabled)
-
-        current_speed_kmh = float(telemetry.get("speed_kmh", 0.0))
-        lane_offset_m = float(telemetry.get("lane_offset_m", 0.0))
-        heading_error = float(telemetry.get("heading_error", 0.0))
-
-        # 1. Lateral Target Offset based on gated maneuver
-        maneuver = gated["maneuver"]
-        if self.use_mock and maneuver == "change_left":
-            target_offset_m = self.lane_width * 0.85
-        elif self.use_mock and maneuver == "change_right":
-            target_offset_m = -self.lane_width * 0.85
-        elif (
-            not self.use_mock
-            and abs(float(telemetry.get("road_curvature", 0.0))) > 0.25
-            and not bool(telemetry.get("left_lane_available", True))
-            and bool(telemetry.get("right_lane_available", False))
-        ):
-            # Keep a 0.18m safety margin away from the left continuous yellow line in lane 0 on tight curves
-            target_offset_m = -0.18
-        else:
-            target_offset_m = 0.0
-
-        lateral_error = (target_offset_m - lane_offset_m) - (
-            self.heading_weight * heading_error
+        """Compute physical control [steering, throttle_brake] in [-1.0, 1.0] via Rust core."""
+        (steering, throttle_brake), gated_dict = self._rust_shield.compute_control(
+            decision, telemetry, float(dt), bool(shield_enabled)
         )
-        pid_steering = float(
-            np.clip(self.lateral_pid.step(lateral_error, dt=dt), -1.0, 1.0)
-        )
-        mpc_ff = 0.0 if self.use_mock else self.compute_mpc_feedforward(decision, telemetry)
-        raw_target_steering = float(
-            np.clip(pid_steering + 0.12 * mpc_ff, -1.0, 1.0)
-        )
-
-        # Linear Steering Ramp ([steer_from -> steer_to]) with speed-adaptive rate limiting
-        steer_from = self.current_steering
-        road_curv = abs(float(telemetry.get("road_curvature", 0.0)))
-        if self.use_mock:
-            max_delta = 1.0
-            alpha = 1.0
-        elif road_curv >= 0.35:
-            # Allow slightly faster steering response on tight highway ramps in MetaDrive
-            speed_damping = 1.0 + 0.012 * max(0.0, current_speed_kmh)
-            max_delta = min(0.22, 3.5 * (1.1 * dt) / speed_damping)
-            alpha = 0.82
-        else:
-            speed_damping = 1.0 + 0.012 * max(0.0, current_speed_kmh)
-            max_delta = (1.1 * dt) / speed_damping
-            alpha = 0.55
-
-        steer_step = float(
-            np.clip((raw_target_steering - steer_from) * alpha, -max_delta, max_delta)
-        )
-        steering = float(np.clip(steer_from + steer_step, -1.0, 1.0))
-        self.current_steering = steering
-
-        # 2. Longitudinal Control: Rule 1 or Model AEB forces immediate full brake (-1.0)
-        accel_from = self.current_throttle_brake
-        if gated["shield_reason"] in ("rule1_emergency_brake", "model_aeb_only"):
-            throttle_brake = -1.0
-        else:
-            speed_error = float(gated["target_speed_kmh"] - current_speed_kmh)
-            raw_tb = float(
-                np.clip(self.longitudinal_pid.step(speed_error, dt=dt), -1.0, 1.0)
-            )
-            if self.use_mock:
-                throttle_brake = raw_tb
-            else:
-                tb_step = float(np.clip(raw_tb - accel_from, -0.25, 0.20))
-                throttle_brake = float(np.clip(accel_from + tb_step, -1.0, 1.0))
-        self.current_throttle_brake = throttle_brake
-
-        gated["steer_from"] = round(steer_from, 4)
-        gated["steer_to"] = round(steering, 4)
-        gated["steer_target"] = round(raw_target_steering, 4)
-        gated["steer_delta"] = round(steering - steer_from, 4)
-        gated["mpc_feedforward"] = round(mpc_ff, 4)
-        gated["steer_ramp_substeps"] = [
-            round(steer_from + (k / 5.0) * (steering - steer_from), 4)
-            for k in range(1, 6)
-        ]
-        gated["steering"] = steering
-        gated["throttle_brake"] = throttle_brake
-        gated["carla_control"] = self.to_carla_control(steering, throttle_brake)
-        return (steering, throttle_brake), gated
+        gated = dict(gated_dict)
+        if "carla_control" in gated and not isinstance(gated["carla_control"], dict):
+            gated["carla_control"] = dict(gated["carla_control"])
+        return (float(steering), float(throttle_brake)), gated
 
     @staticmethod
     def to_carla_control(steering: float, throttle_brake: float) -> Dict[str, Any]:
         """Convert `[steering, throttle_brake]` in `[-1, 1]` to CARLA `VehicleControl` dict."""
-        steer = float(np.clip(steering, -1.0, 1.0))
-        tb = float(np.clip(throttle_brake, -1.0, 1.0))
+        steer = max(-1.0, min(1.0, float(steering)))
+        tb = max(-1.0, min(1.0, float(throttle_brake)))
         return {
             "steer": round(steer, 4),
             "throttle": round(tb if tb >= 0.0 else 0.0, 4),
