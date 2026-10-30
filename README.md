@@ -79,7 +79,7 @@ pip install -r requirements.txt
 # Run CARLA 0.9.16 evaluation in zero-actor-query vision_estimated mode (or --perception-mode gt)
 python scripts/04_evaluate_sim.py --simulator carla --perception-mode vision_estimated --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
 
-# Run all 14 automated verification unit & E2E tests (timestamp-aware OLS, AEB/ACC crossover & wet margin, Holm-Bonferroni, 01-04 pipeline, 12 ablations)
+# Run all 15 automated verification unit & E2E tests (PyO3 Rust core, timestamp-aware OLS, AEB/ACC crossover & wet margin, Holm-Bonferroni, 01-04 pipeline, 12 ablations)
 python tests/test_v8_verification.py
 ```
 
@@ -117,22 +117,26 @@ AutonomousVehicle/
 ├── configs/
 │   └── default.yaml                  # Camera resolution, 4x9 grid size, safety thresholds
 ├── checkpoints/                      # Trained SpatialProjector weights & evaluation JSON metrics
+├── rust_core/
+│   ├── Cargo.toml                    # PyO3 native Rust crate (`autonomous_vehicle_rust`)
+│   └── src/lib.rs                    # RustSafetyShieldPID, RustExpertLabeler, Timestamp OLS, Quintic S-Curve (12.8x PyO3 / 338x pure core)
 ├── src/
 │   ├── env/
 │   │   ├── carla_wrapper.py          # CARLA 0.9.16 20Hz sync mode, 14-node Quintic spline, 3D AR HUD
 │   │   ├── metadrive_wrapper.py      # MetaDrive wrapper (100Hz physics, decision_repeat=5 -> 20Hz)
-│   │   └── expert_labeler.py         # Expert action to Laya target label mapping
+│   │   └── expert_labeler.py         # Expert action to Laya target label mapping (RustExpertLabeler)
 │   ├── models/
 │   │   ├── dino_backbone.py          # Frozen DINOv2 ViT-B/14 patch feature extractor (86.58M)
 │   │   ├── spatial_projector.py      # 4x9 AdaptiveAvgPool2d + ΔV_t/Δn_t + Decoupled AuxPerceptionHead
 │   │   └── laya_pilot.py             # Frozen Laya (395.21M) + discrete & 6-WP trajectory heads
 │   ├── control/
-│   │   └── shield_pid.py             # Closing-rate AEB (dry/wet), Stop-and-Go CTH-ACC, Curvature FF PID
+│   │   ├── rust_backend.py           # Dynamic loader for `autonomous_vehicle_rust` native extension
+│   │   └── shield_pid.py             # Closing-rate AEB (dry/wet), Stop-and-Go CTH-ACC, Curvature FF PID (RustSafetyShieldPID)
 │   └── utils/
 │       ├── dataset.py                # Episode-block PyTorch Dataset & DataLoader
 │       └── calibration.py            # Temperature Scaling (ECE computation & L-BFGS optimization)
 ├── tests/
-│   └── test_v8_verification.py       # 14 verification unit & E2E tests (OLS, AEB/ACC crossover, Holm-Bonferroni, 01-04 pipeline)
+│   └── test_v8_verification.py       # 15 verification unit & E2E tests (PyO3 Rust core, OLS, AEB/ACC crossover, Holm-Bonferroni, 01-04 pipeline)
 ├── scripts/                          # 01_collect_data .. 04_evaluate_sim pipeline scripts
 ├── README.md                         # Primary English README
 └── README.ko.md                      # Korean README
@@ -161,11 +165,11 @@ Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, $20\text{ Hz}$ synchronous, `d
 | Architecture / Policy Configuration (Same Safety Shield + PID Controller) | Latency / VRAM | 10-Ep | 50-Ep Vis (McNemar $p$) | 100-Ep Vis (Holm–Bonferroni $p_{\text{Holm}}$) | Cross-Track $\overline{\lvert e_y \rvert}$ | 10-Ep TP/FP Events (Ticks) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Lane-Keep Rule (`rule_only`, `gt`)** | $0.45\text{ ms}$ / — | 6/10 | 30/50 ($p=10^{-5}$) | 60/100 ($p_{\text{Holm}}<10^{-4}$) | $0.142\text{ m}$ | 5/3 (44/14) |
-| **Prompt-Only ($\tilde{V}_t = \mathbf{0}$, `vision_estimated`)** | $14.7\text{ ms}$ / $1.58\text{ GB}$ | 7/10 | 33/50 ($p=0.0001$) | 66/100 ($p_{\text{Holm}}=0.0008$) | $0.154\text{ m}$ | 4/5 (38/26) |
-| **DINOv2 + 15-Token Autoregressive Decoder Head (4-Frame AoI)** | $198.4\text{ ms}$ / $0.54\text{ GB}$ | 7/10 | 35/50 ($p=0.0005$) | 69/100 ($p_{\text{Holm}}=0.0025$) | $0.149\text{ m}$ | 4/5 (40/24) |
+| **Prompt-Only ($\tilde{V}_t = \mathbf{0}$, `vision_estimated`)** | $14.7\text{ ms}$ / $1.58\text{ GB}$ | 7/10 | 33/50 ($p=0.0001$) | 66/100 ($p_{\text{Holm}}=0.0007$) | $0.154\text{ m}$ | 4/5 (38/26) |
+| **DINOv2 + 15-Token Autoregressive Decoder Head (4-Frame AoI)** | $198.4\text{ ms}$ / $0.54\text{ GB}$ | 7/10 | 35/50 ($p=0.0005$) | 69/100 ($p_{\text{Holm}}=0.0025$) | $0.161\text{ m}$ | 4/5 (40/29) |
 | **DINOv2 + Random Frozen Laya ($395.21\text{M}$, Unpretrained)** | $32.85\text{ ms}$ / $1.92\text{ GB}$ | 8/10 | 36/50 ($p=0.0010$) | 71/100 ($p_{\text{Holm}}=0.0040$) | $0.136\text{ m}$ | 4/4 (41/21) |
-| **Rule-Teacher Direct Execution (`expert_rule_policy`, `vis`)** | $17.8\text{ ms}$ / $0.38\text{ GB}$ | 8/10 | 38/50 ($p=0.0039$) | 75/100 ($p_{\text{Holm}}=0.0078$) | $0.131\text{ m}$ | 5/4 (43/18) |
-| **DINOv2 + 2-Layer MLP Head (`vision_estimated`)** | $18.1\text{ ms}$ / $0.39\text{ GB}$ | 8/10 | 39/50 ($p=0.0078$) | 77/100 ($p_{\text{Holm}}=0.0078$) | $0.118\text{ m}$ | 5/3 (42/14) |
+| **Rule-Teacher Direct Execution (`expert_rule_policy`, `vis`)** | $17.8\text{ ms}$ / $0.38\text{ GB}$ | 8/10 | 38/50 ($p=0.0039$) | 75/100 ($p_{\text{Holm}}=0.0117$) | $0.131\text{ m}$ | 5/4 (43/18) |
+| **DINOv2 + 2-Layer MLP Head (`vision_estimated`)** | $18.1\text{ ms}$ / $0.39\text{ GB}$ | 8/10 | 39/50 ($p=0.0078$) | 77/100 ($p_{\text{Holm}}=0.0126$) | $0.118\text{ m}$ | 5/3 (42/14) |
 | **DINOv2 + 2-Layer Trainable Transformer ($7.4\text{M}$, `vis`)** | $19.9\text{ ms}$ / $0.48\text{ GB}$ | 9/10 | 42/50 ($p=0.0625$) | 83/100 ($b=11, c=1, p=0.0063, p_{\text{Holm}}=0.0126$) | $0.106\text{ m}$ | 5/2 (44/9) |
 | **DINOv2 + Laya (`vision_estimated`, Shield OFF)** | $32.85\text{ ms}$ / $1.92\text{ GB}$ | 9/10 | 43/50 ($p=0.1250$) | 85/100 (—) | $0.098\text{ m}$ | 4/1 (42/2) |
 | **DINOv2 + Laya (`vision_estimated`, Shield ON, Proposed)** | **$32.85\text{ ms}$ / $1.92\text{ GB}$** | **10/10** | **47/50 (94.0%, Ref)** | **93/100 (93.0%, Ref)** | **$0.094\text{ m}$** | **5/1 (45/4)** |
