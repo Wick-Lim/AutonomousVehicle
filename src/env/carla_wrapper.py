@@ -115,6 +115,7 @@ class CarlaWrapper:
         self._npc_actors: List[Any] = []
         self._scenario_actor: Any = None
         self._fsd_scenario_name: str = FSD_SCENARIO_NAMES[0]
+        self._weather_preset: str = "ClearNoon"
         self._fsd_event_resolved: bool = False
         self._fsd_stop_hold_steps: int = 0
         self._fsd_lane_changed: bool = False
@@ -1495,6 +1496,8 @@ class CarlaWrapper:
         crash = bool(self._collision_detected or out_of_road)
         arrive_dest = bool(self._progress >= self._route_length_m and not crash)
 
+        weather_str = str(getattr(self, "_weather_preset", "ClearNoon"))
+        is_wet = any(w in weather_str for w in ("Wet", "Rain", "HardRain", "SoftRain", "MidRainy"))
         telemetry = TelemetryState(
             speed_kmh=speed_kmh,
             lane_offset_m=lane_offset_m,
@@ -1510,6 +1513,9 @@ class CarlaWrapper:
             hazard_source=hazard_source,
             blind_spot_left=blind_spot_left,
             blind_spot_right=blind_spot_right,
+            wet_road=is_wet,
+            a_max_mps2=4.5 if is_wet else 6.0,
+            uncertainty_margin_m=1.8 if is_wet else 0.0,
         )
         route_comp = float(
             np.clip(self._progress / max(1.0, self._route_length_m), 0.0, 1.0)
@@ -1561,6 +1567,13 @@ class CarlaWrapper:
 
         # Urban CARLA Mock Simulator initialization
         self._rng = np.random.default_rng(self._current_seed)
+        scenario_idx = self._current_seed % len(FSD_SCENARIO_NAMES)
+        ep_offset = self._current_seed - self.start_seed
+        weather_shift = (ep_offset // len(FSD_SCENARIO_NAMES)) * 2
+        self._fsd_scenario_name = FSD_SCENARIO_NAMES[scenario_idx]
+        self._weather_preset = FSD_WEATHER_PRESETS[
+            (scenario_idx + weather_shift) % len(FSD_WEATHER_PRESETS)
+        ]
         self._progress = 0.0
         self._route_length_m = float(self._rng.uniform(155.0, 195.0))
         self._num_lanes = 3
@@ -1815,6 +1828,8 @@ class CarlaWrapper:
             if self._scenario_event in ("change_left", "change_right")
             else ("follow_lead" if self._lead_distance_m <= 30.0 else "keep_lane")
         )
+        weather_str = str(getattr(self, "_weather_preset", "ClearNoon"))
+        is_wet = any(w in weather_str for w in ("Wet", "Rain", "HardRain", "SoftRain", "MidRainy"))
         return TelemetryState(
             speed_kmh=self._speed_kmh,
             lane_offset_m=self._lane_offset_m,
@@ -1828,6 +1843,9 @@ class CarlaWrapper:
             expert_maneuver=exp_man,
             traffic_light=self._traffic_light,
             hazard_source=self._hazard_source,
+            wet_road=is_wet,
+            a_max_mps2=4.5 if is_wet else 6.0,
+            uncertainty_margin_m=1.8 if is_wet else 0.0,
         )
 
     def _build_mock_info(

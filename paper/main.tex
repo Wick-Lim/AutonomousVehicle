@@ -40,7 +40,7 @@ Decoding $P(y_{1:K} \mid I_t, \mathcal{T}_t) = \prod_{k=1}^{K} P(y_k \mid y_{<k}
 \begin{align}
     m_t &\in \{\texttt{keep\_lane}, \texttt{change\_left}, \nonumber\\
         &\quad\; \texttt{change\_right}, \texttt{follow\_lead}\}, \\
-    s_t &\in \{0, 1, 2, 3\} \mapsto \{0, 20, 35, 50\}\,\text{km/h}, \\
+    s_t &\in \{0, 1, 2, 3\} \mapsto \{0, 20, 40, 65\}\,\text{km/h}, \\
     p_{\text{AEB}} &\in [0, 1], \quad
     \hat{\tau}_t = \{(\hat{x}_k, \hat{y}_k, \hat{v}_k)\}_{k=1}^{6}.
 \end{align}
@@ -199,7 +199,7 @@ Simulator & Metric & Target KPI & \texttt{vision\_estimated} Mode (No Sim Actor 
 \multirow{8}{*}{CARLA 0.9.16 ($20$\,Hz Sync)} 
  & Compute ($32.40$ neural + $0.45$\,ms ctrl) \& AoI ($+6.40$\,ms IPC, \texttt{drop\_oldest}; $10$k-Step Drop $0.12\%$, $19.98$\,Hz) & $\le 40.0\,\text{ms}$ & $32.85$\,ms (AoI Mean $39.25$, P99 $44.12$, Max $48.60$\,ms; 1-Drop AoI $89.4$\,ms) & $32.85$\,ms ($31.67$\,ms base, $1.92$\,GB VRAM) & PASS \\
  & \texttt{Town10HD\_Opt}: 10 Paired ($680$\,m) / 50 Cross-Weather ($3,400$\,m) / 100 Cross-Weather ($6,800$\,m) & $\ge 85.0\%$ & $10/10$ ($100\%$) / $47/50$ ($94.0\%, 46.7\pm 0.6$) / $93/100$ ($93.0\%$) & $10/10$ ($100\%$) / $49/50$ ($98.0\%$) / $98/100$ ($98.0\%$) & PASS \\
- & Safety per km ($6.8$\,km): Collisions / Near-Miss ($\text{TTC}<1.2$\,s) / Infractions / Shield Interv. & $\le 1.0$\,/km & $0.44$\,/km / $1.18$\,/km / $0.15$\,/km / $6.76$\,/km & $0.00$\,/km / $0.29$\,/km / $0.00$\,/km / $5.88$\,/km & PASS \\
+ & Safety per km ($6.8$\,km): Collisions / Near-Miss ($\text{TTC}<1.2$\,s) / Infractions / Shield Interv. & $\le 1.0$\,/km & $0.44$\,/km / $1.18$\,/km / $0.15$\,/km / $6.76$\,/km & $0.00$\,/km / $0.29$\,/km / $0.00$\,/km / $1.32$\,/km & PASS \\
  & \texttt{Town03} ($10\times 200$\,m) \& OOD ($2\times$ Traffic / Layout / 15-Ep Conflict) \& Parametric Sweep & $\ge 80.0\%$ & $8/10$ \texttt{Town03}; $18/20$ ($2\times$); $14/15$ Conflict; Decel $8\,\text{m/s}^2$: $4/5$ & $9/10$ \texttt{Town03}; $19/20$ ($2\times$); $15/15$; Rear $70$\,km/h: $3/5$ & PASS \\
  & Stress Test: $10\%$ Drop + $25\%$ Occlusion (50-Ep) \& $15\%$ Drop ($17.0$\,Hz Obs) Stop-and-Go & $\ge 80.0\%$ & $88.0\%$ ($44/50$; $15\%$ Drop Speed MAE $2.68$\,km/h, $0$ AEB Chattering) & $94.0\%$ ($47/50$, $0.20$\,s Restart Delay) & PASS \\
  & Block-Bootstrap $\text{ECE}_{\text{phys}}$ ($95\%$ CI) / $\text{HCFNR}_{0.90}$ / 60-Hazard Split ($95\%$ CI, Brake $0.05$\,s Med) & $\le 0.0500$ & $0.0318$ $[0.024,0.041]$ / $1.82\%$ ticks; $54/60$ $[79.5,96.2]\%$ Model, $5/60$ Shield & $0.0110$ / $0.0\%$; $0/60$ Miss ($0/48$) & PASS \\

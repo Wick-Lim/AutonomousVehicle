@@ -6,7 +6,7 @@
 
 > *Sub-40ms Non-Autoregressive Closed-Loop Autonomous Driving in CARLA 0.9.16 & MetaDrive 0.4.3 powered by Frozen DINOv2 & Laya*
 
-**AutonomousVehicle**은 3D 자율주행 시뮬레이터(**CARLA 0.9.16** 및 **MetaDrive 0.4.3**) 환경에서 동결된 자기지도 공간 인지 비전 백본(**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$)과 동결된 비자기회귀(Non-Autoregressive) 의사결정 트랜스포머(**Laya**, `convaiinnovations/laya`, $395.21\text{M}$)를 $4 \times 9$ 시공간 어댑터($4.23\text{M}$ 파라미터: $1.85\text{M}$ 공간 MLP, $1.05\text{M}$ $\Delta n_t$-정규화 시간 차분 게이트, $1.05\text{M}$ 분리형 보조 인지 헤드, $0.28\text{M}$ 판독·6-WP 궤적 헤드)로 결합하고, HD 맵 라우팅, 규칙 기반 안전 실드, 운동학적 경로 추종 제어기를 통합한 실시간 하이브리드 폐루프 자율주행 R&D 프로젝트입니다. **단 한 번의 동기화된 순전파+제어 패스($32.85\text{ ms}$, $30.4\text{ FPS}$; 기본 $31.67\text{ ms}$; 센서$\to$액추에이터 AoI 평균 $39.25\text{ ms}$, P99 $44.12\text{ ms}$)** 안에 **14-웨이포인트($28\text{ m}$) 공간 5차 스플라인 전이**, **5-샘플($0.20\text{ s}$ 구간) 타임스탬프 인지 최소제곱(OLS) 선행차 속도 추정**, **선행차·보행자 분리형 거리 추정 헤드**, **정차-재출발(Stop-and-Go) 등시간 차간거리(CTH) ACC**를 실행합니다.
+**AutonomousVehicle**은 3D 자율주행 시뮬레이터(**CARLA 0.9.16** 및 **MetaDrive 0.4.3**) 환경에서 동결된 자기지도 공간 인지 비전 백본(**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$)과 동결된 비자기회귀(Non-Autoregressive) 의사결정 트랜스포머(**Laya**, `convaiinnovations/laya`, $395.21\text{M}$)를 $4 \times 9$ 시공간 어댑터($4.23\text{M}$ 파라미터 / $4,232,991$ 학습 가중치: $1.85\text{M}$ 공간 MLP, $1.05\text{M}$ $\Delta n_t$-정규화 시간 차분 게이트, $1.05\text{M}$ 분리형 보조 인지 헤드, $0.28\text{M}$ 판독·6-WP 궤적 헤드)로 결합하고, HD 맵 라우팅, 규칙 기반 안전 실드, 운동학적 경로 추종 제어기를 통합한 실시간 하이브리드 폐루프 자율주행 R&D 프로젝트입니다. **단 한 번의 동기화된 순전파+제어 패스($32.85\text{ ms}$, $30.4\text{ FPS}$; 기본 $31.67\text{ ms}$; 센서$\to$액추에이터 AoI 평균 $39.25\text{ ms}$, P99 $44.12\text{ ms}$)** 안에 **14-웨이포인트($28\text{ m}$) 공간 5차 스플라인 전이**, **5-샘플($0.20\text{ s}$ 구간) 타임스탬프 인지 최소제곱(OLS) 선행차 속도 추정**, **선행차·보행자 분리형 거리 추정 헤드**, **정차-재출발(Stop-and-Go) 등시간 차간거리(CTH) ACC**를 실행합니다.
 
 ---
 
@@ -47,7 +47,7 @@
 
 ### 2.2. 단일 패스 비자기회귀 출력 (20 Hz / 50 ms 주기)
 * **`maneuver` (`choice`):** `keep_lane`, `change_left`, `change_right`, `follow_lead`
-* **`speed_level` (`score`):** `0` ($0\text{ km/h}$), `1` ($20\text{ km/h}$), `2` ($35\text{ km/h}$), `3` ($50\text{ km/h}$)
+* **`speed_level` (`score`):** `0` ($0\text{ km/h}$), `1` ($20\text{ km/h}$), `2` ($40\text{ km/h}$), `3` ($65\text{ km/h}$)
 * **`emergency_brake` (`noul`):** 온도 보정된 긴급 제동 확률 $\hat{p}_{\text{AEB}} \in [0.0, 1.0]$
 * **`trajectory` (`6-WP`):** $\hat{\tau}_t = \{(\hat{x}_k, \hat{y}_k, \hat{v}_k)\}_{k=1}^{6}$ ($t_k = 0.5k\text{ s}$), HD 맵 곡률과 $\kappa_{\text{eff}} = 0.70\kappa_{\text{map}} + 0.30\kappa_{\text{traj}}$로 블렌딩되어 곡률 정규화기 역할 수행 (최소 장애물 이격거리 $+0.24\text{ m}$, 횡방향 저크 $-14.2\%$ 개선)
 
@@ -79,7 +79,7 @@ pip install -r requirements.txt
 # CARLA 0.9.16 (Town10HD_Opt) 액터 쿼리 없는 vision_estimated 모드 실시간 주행 및 영상 저장 (--perception-mode gt 선택 가능)
 python scripts/04_evaluate_sim.py --simulator carla --perception-mode vision_estimated --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
 
-# 9개 전체 검증 단위 테스트 실행 (타임스탬프 인지 OLS, AEB/ACC 교차 속도 영역 및 젖은 노면 여유, Holm-Bonferroni 다중검정 등)
+# 14개 전체 검증 단위·통합 테스트 실행 (타임스탬프 인지 OLS, AEB/ACC 교차 속도 영역 및 젖은 노면 여유, Holm-Bonferroni, 01~04 파이프라인, 12개 절제 모드)
 python tests/test_v8_verification.py
 ```
 
@@ -88,7 +88,7 @@ python tests/test_v8_verification.py
 # 1. 전문가 주행 데이터 자동 수집 (에피소드 단위 분리: 8,000 학습 / 1,000 검증 / 1,000 테스트)
 python scripts/01_collect_data.py --num-frames 50000
 
-# 2. 4.23M SpatialProjector + AuxPerceptionHead + 판독·궤적 헤드 공동 학습 (DINOv2 & Laya 동결)
+# 2. 4.23M (4,232,991 가중치) SpatialProjector + AuxPerceptionHead + 판독·궤적 헤드 공동 학습 (DINOv2 & Laya 동결)
 python scripts/02_train_projector.py --epochs 15 --batch-size 32
 
 # 3. 독립 검증 데이터셋(1,000 에피소드) 기반 Temperature Scaling 확률 보정
@@ -132,7 +132,7 @@ AutonomousVehicle/
 │       ├── dataset.py                # 에피소드 블록 분할 PyTorch Dataset & DataLoader
 │       └── calibration.py            # Temperature Scaling (ECE 계산 및 L-BFGS 최적화)
 ├── tests/
-│   └── test_v8_verification.py       # 9개 검증 단위 테스트 (OLS, AEB/ACC 교차 영역, Holm-Bonferroni)
+│   └── test_v8_verification.py       # 14개 검증 단위·통합 테스트 (OLS, AEB/ACC 교차 영역, Holm-Bonferroni, 01~04 파이프라인)
 ├── scripts/                          # 데이터 수집, 학습, 보정, 폐루프 평가 스크립트 (01~04)
 ├── README.md                         # 영문 메인 문서 (English README)
 └── README.ko.md                      # 국문 문서 (Korean README)

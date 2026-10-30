@@ -90,25 +90,41 @@ def compute_aux_and_traj_losses(
         device=device,
     )
 
+    pred_ped = aux.get("pred_ped_distance_m", aux.get("pedestrian_distance_m"))
     loss_ped = (
-        0.05 * F.smooth_l1_loss(aux["pred_ped_distance_m"], gt_ped)
-        if "pred_ped_distance_m" in aux
+        0.05 * F.smooth_l1_loss(pred_ped, gt_ped)
+        if pred_ped is not None
         else torch.tensor(0.0, device=device)
     )
+    pred_rr = aux.get("pred_range_rate_mps", aux.get("range_rate_mps"))
     loss_rr = (
-        0.10 * F.smooth_l1_loss(aux["pred_range_rate_mps"], gt_rr_mps)
-        if "pred_range_rate_mps" in aux
+        0.10 * F.smooth_l1_loss(pred_rr, gt_rr_mps)
+        if pred_rr is not None
         else torch.tensor(0.0, device=device)
     )
 
+    pred_lead = aux.get("pred_lead_distance_m", aux.get("lead_distance_m"))
+    pred_off = aux.get("pred_lane_offset_m", aux.get("lane_offset_m"))
+    tl_logits = aux.get("traffic_light_logits", aux.get("pred_traffic_light_logits"))
+    haz_logits = aux.get("hazard_logits", aux.get("pred_hazard_logits"))
+
+    if "blind_spot_logits" in aux:
+        loss_bs = 0.5 * F.binary_cross_entropy_with_logits(aux["blind_spot_logits"], gt_bs)
+    elif "pred_blindspot_probs" in aux:
+        loss_bs = 0.5 * F.binary_cross_entropy(torch.clamp(aux["pred_blindspot_probs"], 1e-6, 1.0 - 1e-6), gt_bs)
+    elif "blind_spot_probs" in aux:
+        loss_bs = 0.5 * F.binary_cross_entropy(torch.clamp(aux["blind_spot_probs"], 1e-6, 1.0 - 1e-6), gt_bs)
+    else:
+        loss_bs = torch.tensor(0.0, device=device)
+
     loss_aux = (
-        0.05 * F.smooth_l1_loss(aux["pred_lead_distance_m"], gt_lead)
+        0.05 * F.smooth_l1_loss(pred_lead, gt_lead)
         + loss_ped
         + loss_rr
-        + F.smooth_l1_loss(aux["pred_lane_offset_m"], gt_off)
-        + 0.5 * F.cross_entropy(aux["traffic_light_logits"], gt_tl)
-        + 0.5 * F.cross_entropy(aux["hazard_logits"], gt_haz)
-        + 0.5 * F.binary_cross_entropy_with_logits(aux["blind_spot_logits"], gt_bs)
+        + F.smooth_l1_loss(pred_off, gt_off)
+        + 0.5 * F.cross_entropy(tl_logits, gt_tl)
+        + 0.5 * F.cross_entropy(haz_logits, gt_haz)
+        + loss_bs
     )
     return loss_traj, loss_aux
 

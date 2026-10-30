@@ -31,6 +31,9 @@ class TelemetryState:
     hazard_source: str = "none"
     blind_spot_left: bool = False
     blind_spot_right: bool = False
+    wet_road: bool = False
+    a_max_mps2: float = 6.0
+    uncertainty_margin_m: float = 0.0
 
     def to_json_dict(self) -> Dict[str, Any]:
         """Convert telemetry to a clean, rounded dictionary for JSON serialization into Laya."""
@@ -49,6 +52,9 @@ class TelemetryState:
             "hazard_source": str(self.hazard_source),
             "blind_spot_left": bool(self.blind_spot_left),
             "blind_spot_right": bool(self.blind_spot_right),
+            "wet_road": bool(self.wet_road),
+            "a_max_mps2": round(float(self.a_max_mps2), 2),
+            "uncertainty_margin_m": round(float(self.uncertainty_margin_m), 2),
         }
 
 
@@ -82,6 +88,13 @@ class MetaDriveWrapper:
             start_seed if start_seed is not None else env_cfg.get("start_seed", 1000)
         )
         self.num_scenarios: int = int(num_scenarios)
+
+        self.weather: str = str(env_cfg.get("weather", "clear")).lower()
+        self.precipitation: float = float(env_cfg.get("precipitation", 0.0))
+        self._is_wet: bool = bool(
+            self.weather in ("rain", "wet", "heavy_rain", "hardrain", "rainy")
+            or self.precipitation > 0.2
+        )
 
         self.use_mock: bool = bool(
             use_mock or self.cfg.get("project", {}).get("use_mock", False)
@@ -393,6 +406,9 @@ class MetaDriveWrapper:
             lead_distance_m=self._lead_distance_m,
             lead_speed_kmh=self._lead_speed_kmh,
             road_curvature=self._road_curvature,
+            wet_road=self._is_wet,
+            a_max_mps2=4.5 if self._is_wet else 6.0,
+            uncertainty_margin_m=1.8 if self._is_wet else 0.0,
         )
 
     def _build_mock_info(
@@ -771,6 +787,10 @@ class MetaDriveWrapper:
         except Exception:
             pass
 
+        is_wet = bool(
+            str(info.get("weather", self.weather)).lower() in ("rain", "wet", "heavy_rain", "hardrain", "rainy")
+            or float(info.get("precipitation", self.precipitation)) > 0.2
+        )
         telemetry = TelemetryState(
             speed_kmh=speed_kmh,
             lane_offset_m=lane_offset_m,
@@ -782,6 +802,9 @@ class MetaDriveWrapper:
             lead_speed_kmh=lead_speed_kmh,
             road_curvature=road_curvature,
             expert_maneuver=expert_maneuver,
+            wet_road=is_wet,
+            a_max_mps2=4.5 if is_wet else 6.0,
+            uncertainty_margin_m=1.8 if is_wet else 0.0,
         )
         extra_info = {
             "step": self._step_count,

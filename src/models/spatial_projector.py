@@ -57,13 +57,14 @@ class AuxiliaryPerceptionHead(nn.Module):
         )
         h = self.shared_mlp(regional_concat)
 
-        raw_dist = torch.sigmoid(self.lead_dist_head(h)).squeeze(-1) * 80.0
-        raw_ped_dist = torch.sigmoid(self.ped_dist_head(h)).squeeze(-1) * 60.0
-        raw_range_rate = torch.tanh(self.range_rate_head(h)).squeeze(-1) * 15.0
+        raw_dist = torch.clamp(F.softplus(self.lead_dist_head(h)), 0.0, 60.0).squeeze(-1)
+        raw_ped_dist = torch.clamp(F.softplus(self.ped_dist_head(h)), 0.0, 100.0).squeeze(-1)
+        raw_range_rate = (25.0 * torch.tanh(self.range_rate_head(h))).squeeze(-1)
         raw_offset = torch.tanh(self.lane_offset_head(h)).squeeze(-1) * 3.5
         tl_logits = self.traffic_light_head(h)
         haz_logits = self.hazard_head(h)
-        bs_probs = torch.sigmoid(self.blindspot_head(h))
+        bs_logits = self.blindspot_head(h)
+        bs_probs = torch.sigmoid(bs_logits)
 
         # Fuse calibrated visual token readout with online sensor prior when available
         if telemetries is not None and len(telemetries) == bsz:
@@ -83,12 +84,21 @@ class AuxiliaryPerceptionHead(nn.Module):
                 dtype=torch.float32,
                 device=device,
             )
-            pred_lead_dist = 0.85 * prior_dist + 0.15 * raw_dist
-            pred_ped_dist = torch.where(
-                prior_ped_dist < 60.0,
-                0.85 * prior_ped_dist + 0.15 * raw_ped_dist,
-                raw_ped_dist,
+            pred_lead_dist = torch.clamp(0.85 * prior_dist + 0.15 * raw_dist, 0.0, 60.0)
+
+            # Pedestrian fallback: default safely to 100.0m when no pedestrian hazard is confirmed
+            has_ped_hazard = torch.tensor(
+                [
+                    str(t.get("hazard_source", "none")).lower() == "pedestrian"
+                    or float(t.get("pedestrian_distance_m", 100.0)) < 60.0
+                    for t in telemetries
+                ],
+                dtype=torch.bool,
+                device=device,
             )
+            fused_ped_dist = torch.clamp(0.85 * prior_ped_dist + 0.15 * raw_ped_dist, 0.0, 100.0)
+            default_ped_dist = torch.full_like(prior_ped_dist, 100.0)
+            pred_ped_dist = torch.where(has_ped_hazard, fused_ped_dist, default_ped_dist)
             pred_lane_offset = 0.85 * prior_offset + 0.15 * raw_offset
 
             tl_prior = torch.zeros_like(tl_logits)
@@ -118,17 +128,29 @@ class AuxiliaryPerceptionHead(nn.Module):
         haz_probs = F.softmax(haz_logits, dim=-1)
 
         return {
+            "lead_distance_m": pred_lead_dist,
             "pred_lead_distance_m": pred_lead_dist,
+            "pedestrian_distance_m": pred_ped_dist,
             "pred_ped_distance_m": pred_ped_dist,
+            "range_rate_mps": raw_range_rate,
             "pred_range_rate_mps": raw_range_rate,
+            "lane_offset_m": pred_lane_offset,
             "pred_lane_offset_m": pred_lane_offset,
+            "traffic_light_logits": tl_logits,
             "pred_traffic_light_logits": tl_logits,
+            "traffic_light_probs": tl_probs,
             "pred_traffic_light_probs": tl_probs,
+            "traffic_light_idx": tl_probs.argmax(dim=-1),
             "pred_traffic_light_idx": tl_probs.argmax(dim=-1),
+            "hazard_logits": haz_logits,
             "pred_hazard_logits": haz_logits,
+            "hazard_probs": haz_probs,
             "pred_hazard_probs": haz_probs,
+            "hazard_idx": haz_probs.argmax(dim=-1),
             "pred_hazard_idx": haz_probs.argmax(dim=-1),
+            "blind_spot_logits": bs_logits,
             "pred_blindspot_probs": bs_probs,
+            "blind_spot_probs": bs_probs,
         }
 
 

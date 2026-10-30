@@ -6,7 +6,7 @@
 
 > *Sub-40ms Non-Autoregressive Closed-Loop Autonomous Driving in CARLA 0.9.16 & MetaDrive 0.4.3 powered by Frozen DINOv2 & Laya*
 
-**AutonomousVehicle** is an open-source hybrid closed-loop autonomous driving R&D framework that couples a frozen self-supervised vision backbone (**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$) and a frozen non-autoregressive decision transformer (**Laya**, `convaiinnovations/laya`, $395.21\text{M}$) via a trainable $4 \times 9$ spatial-temporal adapter ($4.23\text{M}$ parameters: $1.85\text{M}$ spatial MLP, $1.05\text{M}$ $\Delta n_t$-normalized temporal gate, $1.05\text{M}$ decoupled auxiliary perception head, and $0.28\text{M}$ readout/6-WP trajectory heads) with HD-map routing, a rule-based safety shield, and kinematic path tracking. Unlike autoregressive Vision-Language-Action (VLA) decoders ($>300\text{ ms/frame}$), our stack executes **one synchronized forward+control pass in $32.85\text{ ms}$ ($30.4\text{ FPS}$; $31.67\text{ ms}$ base; sensor-to-actuator AoI mean $39.25\text{ ms}$, P99 $44.12\text{ ms}$)** coupled with **14-node ($28\text{ m}$) Spatial Quintic Spline transitions**, **5-sample ($0.20\text{ s}$ span) timestamp-aware OLS lead-speed estimation**, **decoupled pedestrian depth estimation**, and **Stop-and-Go Constant-Time-Headway Adaptive Cruise Control (CTH-ACC)**.
+**AutonomousVehicle** is an open-source hybrid closed-loop autonomous driving R&D framework that couples a frozen self-supervised vision backbone (**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$) and a frozen non-autoregressive decision transformer (**Laya**, `convaiinnovations/laya`, $395.21\text{M}$) via a trainable $4 \times 9$ spatial-temporal adapter ($4.23\text{M}$ parameters / $4,232,991$ trainable weights: $1.85\text{M}$ spatial MLP, $1.05\text{M}$ $\Delta n_t$-normalized temporal gate, $1.05\text{M}$ decoupled auxiliary perception head, and $0.28\text{M}$ readout/6-WP trajectory heads) with HD-map routing, a rule-based safety shield, and kinematic path tracking. Unlike autoregressive Vision-Language-Action (VLA) decoders ($>300\text{ ms/frame}$), our stack executes **one synchronized forward+control pass in $32.85\text{ ms}$ ($30.4\text{ FPS}$; $31.67\text{ ms}$ base; sensor-to-actuator AoI mean $39.25\text{ ms}$, P99 $44.12\text{ ms}$)** coupled with **14-node ($28\text{ m}$) Spatial Quintic Spline transitions**, **5-sample ($0.20\text{ s}$ span) timestamp-aware OLS lead-speed estimation**, **decoupled pedestrian depth estimation**, and **Stop-and-Go Constant-Time-Headway Adaptive Cruise Control (CTH-ACC)**.
 
 ---
 
@@ -47,7 +47,7 @@
 
 ### 2.2. Single-Pass Non-Autoregressive Outputs (20 Hz / 50 ms cycle)
 * **`maneuver` (`choice`):** `keep_lane`, `change_left`, `change_right`, `follow_lead`
-* **`speed_level` (`score`):** `0` ($0\text{ km/h}$), `1` ($20\text{ km/h}$), `2` ($35\text{ km/h}$), `3` ($50\text{ km/h}$)
+* **`speed_level` (`score`):** `0` ($0\text{ km/h}$), `1` ($20\text{ km/h}$), `2` ($40\text{ km/h}$), `3` ($65\text{ km/h}$)
 * **`emergency_brake` (`noul`):** Temperature-calibrated probability $\hat{p}_{\text{AEB}} \in [0.0, 1.0]$
 * **`trajectory` (`6-WP`):** $\hat{\tau}_t = \{(\hat{x}_k, \hat{y}_k, \hat{v}_k)\}_{k=1}^{6}$ ($t_k = 0.5k\text{ s}$), blended as a curvature regularizer $\kappa_{\text{eff}} = 0.70\kappa_{\text{map}} + 0.30\kappa_{\text{traj}}$ ($+0.24\text{ m}$ obstacle clearance, $-14.2\%$ lateral jerk).
 
@@ -79,7 +79,7 @@ pip install -r requirements.txt
 # Run CARLA 0.9.16 evaluation in zero-actor-query vision_estimated mode (or --perception-mode gt)
 python scripts/04_evaluate_sim.py --simulator carla --perception-mode vision_estimated --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
 
-# Run all 9 automated verification unit tests (timestamp-aware OLS, AEB/ACC crossover & wet margin, Holm-Bonferroni, etc.)
+# Run all 14 automated verification unit & E2E tests (timestamp-aware OLS, AEB/ACC crossover & wet margin, Holm-Bonferroni, 01-04 pipeline, 12 ablations)
 python tests/test_v8_verification.py
 ```
 
@@ -88,7 +88,7 @@ python tests/test_v8_verification.py
 # 1. Automated expert driving dataset collection (disjoint 8,000 train / 1,000 val / 1,000 test episodes)
 python scripts/01_collect_data.py --num-frames 50000
 
-# 2. Train the 4.23M SpatialProjector + AuxPerceptionHead + Readout/Trajectory heads (DINOv2 & Laya frozen)
+# 2. Train the 4.23M (4,232,991 weights) SpatialProjector + AuxPerceptionHead + Readout/Trajectory heads (DINOv2 & Laya frozen)
 python scripts/02_train_projector.py --epochs 15 --batch-size 32
 
 # 3. Post-hoc Temperature Scaling calibration on held-out episode-block validation split
@@ -132,7 +132,7 @@ AutonomousVehicle/
 │       ├── dataset.py                # Episode-block PyTorch Dataset & DataLoader
 │       └── calibration.py            # Temperature Scaling (ECE computation & L-BFGS optimization)
 ├── tests/
-│   └── test_v8_verification.py       # 9 verification unit tests (OLS, AEB/ACC crossover, Holm-Bonferroni)
+│   └── test_v8_verification.py       # 14 verification unit & E2E tests (OLS, AEB/ACC crossover, Holm-Bonferroni, 01-04 pipeline)
 ├── scripts/                          # 01_collect_data .. 04_evaluate_sim pipeline scripts
 ├── README.md                         # Primary English README
 └── README.ko.md                      # Korean README
