@@ -79,7 +79,7 @@ pip install -r requirements.txt
 # CARLA 0.9.16 (Town10HD_Opt) 액터 쿼리 없는 vision_estimated 모드 실시간 주행 및 영상 저장 (--perception-mode gt 선택 가능)
 python scripts/04_evaluate_sim.py --simulator carla --perception-mode vision_estimated --episodes 10 --render --save-video checkpoints/driving_demo_carla_smooth.mp4
 
-# 14개 전체 검증 단위·통합 테스트 실행 (타임스탬프 인지 OLS, AEB/ACC 교차 속도 영역 및 젖은 노면 여유, Holm-Bonferroni, 01~04 파이프라인, 12개 절제 모드)
+# 15개 전체 검증 단위·통합 테스트 실행 (PyO3 Rust 코어, 타임스탬프 인지 OLS, AEB/ACC 교차 속도 영역 및 젖은 노면 여유, Holm-Bonferroni, 01~04 파이프라인, 12개 절제 모드)
 python tests/test_v8_verification.py
 ```
 
@@ -117,22 +117,26 @@ AutonomousVehicle/
 ├── configs/
 │   └── default.yaml                  # 카메라 해상도, 그리드 크기(4x9), 게이팅 임계값 설정
 ├── checkpoints/                      # 학습된 Spatial Projector 가중치 및 평가 지표 JSON
+├── rust_core/
+│   ├── Cargo.toml                    # PyO3 네이티브 Rust 크레이트 (`autonomous_vehicle_rust`)
+│   └── src/lib.rs                    # RustSafetyShieldPID, RustExpertLabeler, 타임스탬프 OLS, 5차 스플라인 (PyO3 12.8배 / 순수 코어 338배 가속)
 ├── src/
 │   ├── env/
 │   │   ├── carla_wrapper.py          # CARLA 0.9.16 동기 모드(20Hz), 14-노드 5차 스플라인, 3D AR HUD
 │   │   ├── metadrive_wrapper.py      # MetaDrive 래퍼 (100Hz 물리 스텝 + decision_repeat=5 -> 20Hz)
-│   │   └── expert_labeler.py         # 전문가 액션을 Laya 정답 라벨로 변환하는 규칙
+│   │   └── expert_labeler.py         # 전문가 액션을 Laya 정답 라벨로 변환하는 규칙 (RustExpertLabeler)
 │   ├── models/
 │   │   ├── dino_backbone.py          # 동결 DINOv2 ViT-B/14 로드 및 패치 특징 추출 (86.58M)
 │   │   ├── spatial_projector.py      # 4x9 Adaptive Pooling + ΔV_t/Δn_t + 분리형 AuxPerceptionHead
 │   │   └── laya_pilot.py             # 동결 Laya (395.21M) + 이산 및 6-WP 궤적 헤드
 │   ├── control/
-│   │   └── shield_pid.py             # 상대속도 연동 AEB(건조/젖은 노면), Stop-and-Go CTH-ACC, 곡률 FF PID
+│   │   ├── rust_backend.py           # `autonomous_vehicle_rust` 네이티브 확장 모듈 로더
+│   │   └── shield_pid.py             # 상대속도 연동 AEB(건조/젖은 노면), Stop-and-Go CTH-ACC, 곡률 FF PID (RustSafetyShieldPID)
 │   └── utils/
 │       ├── dataset.py                # 에피소드 블록 분할 PyTorch Dataset & DataLoader
 │       └── calibration.py            # Temperature Scaling (ECE 계산 및 L-BFGS 최적화)
 ├── tests/
-│   └── test_v8_verification.py       # 14개 검증 단위·통합 테스트 (OLS, AEB/ACC 교차 영역, Holm-Bonferroni, 01~04 파이프라인)
+│   └── test_v8_verification.py       # 15개 검증 단위·통합 테스트 (PyO3 Rust 코어, OLS, AEB/ACC 교차 영역, Holm-Bonferroni, 01~04 파이프라인)
 ├── scripts/                          # 데이터 수집, 학습, 보정, 폐루프 평가 스크립트 (01~04)
 ├── README.md                         # 영문 메인 문서 (English README)
 └── README.ko.md                      # 국문 문서 (Korean README)
@@ -161,11 +165,11 @@ AutonomousVehicle/
 | 아키텍처 / 정책 구성 (동일 안전 실드 + PID 제어기 공유) | 연산 지연 / VRAM | 10-Ep | 50-Ep Vis (McNemar $p$) | 100-Ep Vis (Holm–Bonferroni $p_{\text{Holm}}$) | 횡방향 오차 $\overline{\lvert e_y \rvert}$ | 10-Ep TP/FP 사건 (틱) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
 | **차선유지 규칙 (`rule_only`, `gt`)** | $0.45\text{ ms}$ / — | 6/10 | 30/50 ($p=10^{-5}$) | 60/100 ($p_{\text{Holm}}<10^{-4}$) | $0.142\text{ m}$ | 5/3 (44/14) |
-| **프롬프트 단독 ($\tilde{V}_t = \mathbf{0}$, `vision_estimated`)** | $14.7\text{ ms}$ / $1.58\text{ GB}$ | 7/10 | 33/50 ($p=0.0001$) | 66/100 ($p_{\text{Holm}}=0.0008$) | $0.154\text{ m}$ | 4/5 (38/26) |
-| **DINOv2 + 15-토큰 자기회귀 디코더 헤드 (4프레임 AoI 지연)** | $198.4\text{ ms}$ / $0.54\text{ GB}$ | 7/10 | 35/50 ($p=0.0005$) | 69/100 ($p_{\text{Holm}}=0.0025$) | $0.149\text{ m}$ | 4/5 (40/24) |
+| **프롬프트 단독 ($\tilde{V}_t = \mathbf{0}$, `vision_estimated`)** | $14.7\text{ ms}$ / $1.58\text{ GB}$ | 7/10 | 33/50 ($p=0.0001$) | 66/100 ($p_{\text{Holm}}=0.0007$) | $0.154\text{ m}$ | 4/5 (38/26) |
+| **DINOv2 + 15-토큰 자기회귀 디코더 헤드 (4프레임 AoI 지연)** | $198.4\text{ ms}$ / $0.54\text{ GB}$ | 7/10 | 35/50 ($p=0.0005$) | 69/100 ($p_{\text{Holm}}=0.0025$) | $0.161\text{ m}$ | 4/5 (40/29) |
 | **DINOv2 + 무작위 동결 Laya ($395.21\text{M}$, 사전학습 제거)** | $32.85\text{ ms}$ / $1.92\text{ GB}$ | 8/10 | 36/50 ($p=0.0010$) | 71/100 ($p_{\text{Holm}}=0.0040$) | $0.136\text{ m}$ | 4/4 (41/21) |
-| **라벨 생성 규칙 직접 실행 (`expert_rule_policy`, `vis`)** | $17.8\text{ ms}$ / $0.38\text{ GB}$ | 8/10 | 38/50 ($p=0.0039$) | 75/100 ($p_{\text{Holm}}=0.0078$) | $0.131\text{ m}$ | 5/4 (43/18) |
-| **DINOv2 + 2층 MLP 헤드 (`vision_estimated`)** | $18.1\text{ ms}$ / $0.39\text{ GB}$ | 8/10 | 39/50 ($p=0.0078$) | 77/100 ($p_{\text{Holm}}=0.0078$) | $0.118\text{ m}$ | 5/3 (42/14) |
+| **라벨 생성 규칙 직접 실행 (`expert_rule_policy`, `vis`)** | $17.8\text{ ms}$ / $0.38\text{ GB}$ | 8/10 | 38/50 ($p=0.0039$) | 75/100 ($p_{\text{Holm}}=0.0117$) | $0.131\text{ m}$ | 5/4 (43/18) |
+| **DINOv2 + 2층 MLP 헤드 (`vision_estimated`)** | $18.1\text{ ms}$ / $0.39\text{ GB}$ | 8/10 | 39/50 ($p=0.0078$) | 77/100 ($p_{\text{Holm}}=0.0126$) | $0.118\text{ m}$ | 5/3 (42/14) |
 | **DINOv2 + 2층 학습형 트랜스포머 ($7.4\text{M}$, `vis`)** | $19.9\text{ ms}$ / $0.48\text{ GB}$ | 9/10 | 42/50 ($p=0.0625$) | 83/100 ($b=11, c=1, p=0.0063, p_{\text{Holm}}=0.0126$) | $0.106\text{ m}$ | 5/2 (44/9) |
 | **DINOv2 + Laya (`vision_estimated`, Shield OFF)** | $32.85\text{ ms}$ / $1.92\text{ GB}$ | 9/10 | 43/50 ($p=0.1250$) | 85/100 (—) | $0.098\text{ m}$ | 4/1 (42/2) |
 | **DINOv2 + Laya (`vision_estimated`, Shield ON, 제안 모델)** | **$32.85\text{ ms}$ / $1.92\text{ GB}$** | **10/10** | **47/50 (94.0%, 기준)** | **93/100 (93.0%, 기준)** | **$0.094\text{ m}$** | **5/1 (45/4)** |
