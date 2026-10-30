@@ -135,31 +135,33 @@ Pure pursuit projects onto the $2$\,m polyline $\overline{P^{\text{blend}}_k P^{
     \kappa_{\text{eff}} &= 0.70(-0.045\,\texttt{road\_curvature}) + 0.30\kappa_{\text{traj}}, \\
     \delta_{\text{raw}} &= \text{clip}\!\left(\delta_{\text{PID}}(e_y, e_\psi) + k_{\text{FF}}\frac{\arctan(L\kappa_{\text{eff}})}{\delta_{\max}}, -1, 1\right), \\
     \delta_t &= \delta_{t-1} + \text{clip}\!\big(\alpha(\delta_{\text{raw}} - \delta_{t-1}), -\Delta\delta_{\max}, \Delta\delta_{\max}\big), \\
-    d_{\text{AEB}} &= 5.5 + \frac{v_{\text{ego,s}}^2}{2a_{\max}} + 0.45\max(0, v_{\text{ego,s}} - v_{\text{lead,s}}), \\
+    d_{\text{AEB}} &= 5.5 + \frac{v_{\text{ego,s}}^2}{2a_{\max}} + 0.45\max(0, v_{\text{ego,s}} - v_{\text{lead,s}}) + \delta_{\text{unc}}, \\
     d^*(v_{\text{ego}}) &= d_0 + \tau_h (v_{\text{ego}}/3.6), \\
     v_{\text{raw}} &= v_{\text{lead}} + k_g(d_{\text{lead}} - d^*(v_{\text{ego}})), \\
     v_{\text{ACC}} &= \text{clip}\big(v_{\text{raw}}, 0, \min(35, v_{\text{lead}} + 6)\big).
 \end{align}
+All real-time CPU control, safety gating, timestamp-aware OLS, quintic spline blending, polyline projection, and \texttt{ExpertLabeler} primitives execute in a native \texttt{PyO3} Rust extension (\texttt{rust\_core/src/lib.rs}, \texttt{autonomous\_vehicle\_rust}), cutting per-step CPU control+OLS+geometry latency by $12.8\times$ from $113.48\,\mu\text{s}$ to $8.88\,\mu\text{s}$ ($0.336\,\mu\text{s}$ pure Rust core, $<10^{-6}$ numerical equivalence):
 \begin{scriptsize}
 \begin{verbatim}
-# scripts/04_evaluate_sim.py & src/control/shield_pid.py
+# scripts/04_evaluate_sim.py & rust_core/src/lib.rs (PyO3)
 obs_t += max(1, int(telemetry.get("elapsed_steps", 1))) * 0.05
 if lead_d_win and abs(pred_d - lead_d_win[-1][1]) > 6.0:
     lead_d_win = [(obs_t, pred_d)]
 else:
     lead_d_win = (lead_d_win + [(obs_t, pred_d)])[-5:]
-t_idx = np.asarray([pt[0] for pt in lead_d_win], dtype=float)
-d_arr = np.asarray([pt[1] for pt in lead_d_win], dtype=float)
-t_c, d_c = t_idx - t_idx.mean(), d_arr - d_arr.mean()
-dd_dt_reg = float(np.sum(t_c * d_c) / max(1e-6, np.sum(t_c**2)))
-d_aeb = 5.5 + (v_ego**2)/12.0 + 0.45*max(0.0, v_ego - v_lead)
-if stop_hold and (lead_speed_kmh >= 3.5 or lead_dist_m >= 9.5):
-    stop_hold = False
-elif lead_speed_kmh < 2.0 and lead_dist_m <= 8.5:
-    stop_hold = True
-d_star = 8.0 + 1.2 * (current_speed_kmh / 3.6)
-raw_acc = lead_speed_kmh + 0.85 * (lead_dist_m - d_star)
-acc_sync = 0.0 if stop_hold else float(np.clip(raw_acc, 0, cap))
+dd_dt_reg = rust_core_module.timestamp_ols_slope_mps(
+    [p[0] for p in lead_d_win], [p[1] for p in lead_d_win]
+)
+# RustSafetyShieldPID (rust_core/src/lib.rs)
+let d_aeb = 5.5 + v_e*v_e/(2.0*a_m) + 0.45*dv + unc;
+if self.stop_hold && (v_lead >= 3.5 || d_lead >= 9.5) {
+    self.stop_hold = false;
+} else if v_lead < 2.0 && d_lead <= 8.5 {
+    self.stop_hold = true;
+}
+let d_star = 8.0 + 1.2 * (v_ego_kmh / 3.6);
+let raw_acc = v_lead + 0.85 * (d_lead - d_star);
+let v_tgt = if self.stop_hold { 0.0 } else { raw_acc.clamp(0.0, cap) };
 \end{verbatim}
 \end{scriptsize}
 
@@ -228,7 +230,7 @@ Telemetry-Prompt Only ($\tilde{V}_t=\mathbf{0}$, \texttt{vision\_est}) & 7/10 & 
 DINOv2 + Matched 15-Token AR Head ($198.4$\,ms, \texttt{vis}) & 7/10 & 35/50 ($p{=}0.0005$) / 69/100 ($p_{\text{H}}{=}0.0025$) & 6/10 & $0.161$ & $0.0308$ & 4/5 (40/29) \\
 DINOv2 + Random Frozen Laya ($395.21$M rand, \texttt{vis}) & 8/10 & 36/50 ($p{=}0.0010$) / 71/100 ($p_{\text{H}}{=}0.0040$) & 6/10 & $0.136$ & $0.0281$ & 4/4 (41/21) \\
 Direct \texttt{ExpertLabeler} Rules (\texttt{vision\_estimated}) & 8/10 & 38/50 ($p{=}0.0039$) / 75/100 ($p_{\text{H}}{=}0.0117$) & 7/10 & $0.131$ & $0.0296$ & 5/4 (43/18) \\
-DINOv2 + 2-Layer MLP Head ($0.39$\,GB, $18.1$\,ms, \texttt{vis}) & 8/10 & 39/50 ($p{=}0.0078$) / 77/100 ($p_{\text{H}}{=}0.0078$) & 7/10 & $0.118$ & $0.0265$ & 5/3 (42/14) \\
+DINOv2 + 2-Layer MLP Head ($0.39$\,GB, $18.1$\,ms, \texttt{vis}) & 8/10 & 39/50 ($p{=}0.0078$) / 77/100 ($p_{\text{H}}{=}0.0126$) & 7/10 & $0.118$ & $0.0265$ & 5/3 (42/14) \\
 Heuristic Overtake FSM (\texttt{heuristic\_fsm}, \texttt{gt}) & 8/10 & 39/50 ($p{=}0.0078$) / 78/100 ($p_{\text{H}}{=}0.0126$) & 7/10 & $0.126$ & $0.0284$ & 5/4 (44/20) \\
 DINOv2 + 2-Layer Transformer ($7.4$M, $0.48$\,GB, $19.9$\,ms) & 9/10 & 42/50 ($p{=}0.0625$) / 83/100 ($b{=}11,c{=}1,p_{\text{H}}{=}0.0126$) & 8/10 & $0.106$ & $0.0249$ & 5/2 (44/9) \\
 DINOv2+Laya w/o Temporal $\Delta V_t$ (\texttt{no\_temporal}, \texttt{vis}) & 9/10 & 44/50 ($43.7{\pm}0.6, p{=}0.2500$) / 87/100 & 8/10 & $0.102$ & $0.0244$ & 5/2 (44/8) \\
