@@ -6,7 +6,7 @@
 
 > *Sub-40ms Non-Autoregressive Closed-Loop Autonomous Driving in CARLA 0.9.16 & MetaDrive 0.4.3 powered by Frozen DINOv2 & Laya*
 
-**AutonomousVehicle**은 3D 자율주행 시뮬레이터(**CARLA 0.9.16** 및 **MetaDrive 0.4.3**) 환경에서 동결된 자기지도 공간 인지 비전 백본(**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$)과 동결된 비자기회귀(Non-Autoregressive) 의사결정 트랜스포머(**Laya**, `convaiinnovations/laya`, $395.21\text{M}$)를 $4 \times 9$ 시공간 어댑터($4.23\text{M}$ 파라미터 / $4,232,991$ 학습 가중치: $1.85\text{M}$ 공간 MLP, $1.05\text{M}$ $\Delta n_t$-정규화 시간 차분 게이트, $1.05\text{M}$ 분리형 보조 인지 헤드, $0.28\text{M}$ 판독·6-WP 궤적 헤드)로 결합하고, HD 맵 라우팅, 규칙 기반 안전 실드, 운동학적 경로 추종 제어기를 통합한 실시간 하이브리드 폐루프 자율주행 R&D 프로젝트입니다. **단 한 번의 동기화된 순전파+제어 패스($32.85\text{ ms}$, $30.4\text{ FPS}$; 기본 $31.67\text{ ms}$; 센서$\to$액추에이터 AoI 평균 $39.25\text{ ms}$, P99 $44.12\text{ ms}$)** 안에 **14-웨이포인트($28\text{ m}$) 공간 5차 스플라인 전이**, **5-샘플($0.20\text{ s}$ 구간) 타임스탬프 인지 최소제곱(OLS) 선행차 속도 추정**, **선행차·보행자 분리형 거리 추정 헤드**, **정차-재출발(Stop-and-Go) 등시간 차간거리(CTH) ACC**를 실행합니다.
+**AutonomousVehicle**은 3D 자율주행 시뮬레이터(**CARLA 0.9.16** 및 **MetaDrive 0.4.3**) 환경에서 동결된 자기지도 공간 인지 비전 백본(**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$)과 동결된 비자기회귀(Non-Autoregressive) 의사결정 트랜스포머(**Laya**, `convaiinnovations/laya`, $395.21\text{M}$)를 $4 \times 9$ 시공간 어댑터($4.23\text{M}$ 파라미터 / $4,232,991$ 학습 가중치: $1.85\text{M}$ 공간 MLP, $1.05\text{M}$ $\Delta n_t$-정규화 시간 차분 게이트, $1.05\text{M}$ 분리형 보조 인지 헤드, $0.28\text{M}$ 판독·6-WP 궤적 헤드)로 결합하고, 다중 모드 측위(`hd_map`, `hybrid_fallback`, `mapless_vision`), 360° 4D 도플러 비전–레이더–사각지대(BSM) 융합(`vision_radar_fusion`), 규칙 기반 안전 실드, 운동학적 경로 추종 제어기를 통합한 실시간 하이브리드 폐루프 자율주행 R&D 프로젝트입니다. **단 한 번의 동기화된 순전파+제어 패스($32.85\text{ ms}$, $30.4\text{ FPS}$; 기본 $31.67\text{ ms}$; 센서$\to$액추에이터 AoI 평균 $39.25\text{ ms}$, P99 $44.12\text{ ms}$)** 안에 **14-웨이포인트($28\text{ m}$) 공간 5차 스플라인 전이**, **전역 Point-to-Point 실시간 동적 A\* 재탐색 및 도로 폐쇄 장애물 우회 접합**, **추가 학습 가중치 0개의 순수 비전 맵리스 주행 통로 추정기(`MaplessVisionCorridorEstimator`)**, **5-샘플($0.20\text{ s}$ 구간) 타임스탬프 인지 최소제곱(OLS) 선행차 속도 추정**, **선행차·보행자 분리형 거리 추정 헤드**, **정차-재출발(Stop-and-Go) 등시간 차간거리(CTH) ACC**를 실행합니다.
 
 ---
 
@@ -119,22 +119,25 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ```
 > **제공 HTTP 엔드포인트 (`FastAPI`):** `GET /healthz`, `GET /readyz`, `GET /v1/info`, `POST /v1/step`, `POST /v1/step/multipart`, `POST /v1/sessions/{session_id}/reset`, `DELETE /v1/sessions/{session_id}`, `GET /v1/metrics`, Prometheus `GET /metrics`.
 
-### 3.5. 실시간 3D 웹 시뮬레이션 콕핏 및 극한 스트레스 벤치마크 (`MetaDrive 3D` & `CARLA 0.9.16`)
-자체 물리 엔진을 처음부터 새로 구현하지 않고, 실제 **MetaDrive 0.4.3 3D** 및 **CARLA 0.9.16 (Unreal/PhysX)** 위에 360° 자차(Ego) 좌표계 레이더/사각지대(BSM) 융합(`vision_radar_fusion`), 노면 마찰계수 동기화, 액추에이터 서보 지연·데드존 물리 모델, SOTIF 카메라/레이더 결함 주입을 통합했습니다:
+### 3.5. 실시간 3D 웹 시뮬레이션 콕핏, 적대적 스트레스 및 멀티루트·맵리스 벤치마크 (`MetaDrive 3D` & `CARLA 0.9.16`)
+자체 물리 엔진을 처음부터 새로 구현하지 않고, 실제 **MetaDrive 0.4.3 3D** 및 **CARLA 0.9.16 (Unreal/PhysX)** 위에 360° 자차(Ego) 좌표계 레이더/사각지대(BSM) 융합(`vision_radar_fusion`), 노면 마찰계수 동기화, 액추에이터 서보 지연·데드존 물리 모델, SOTIF 카메라/레이더/HD맵 드롭아웃 결함 주입, 전역 Point-to-Point 동적 A\* 재탐색, 무파라미터 순수 비전 맵리스 코리더 추정을 통합했습니다:
 ```bash
-# 1. 실제 MetaDrive 3D 기반 실시간 웹소켓 3D 시뮬레이션 콕핏 실행
+# 1. 대화형 2D 클릭 내비게이션 A* 미니맵이 탑재된 실시간 3D 웹 시뮬레이션 콕핏 실행
 python -m src.cli cockpit --simulator metadrive --open-browser
+python -m src.cli cockpit --simulator carla --auto-launch-carla --open-browser
 
-# 2. CARLA 0.9.16 기반 실시간 콕핏 실행
-python -m src.cli cockpit --simulator carla --open-browser
-
-# 3. 6종 극한 스트레스 시나리오 벤치마크 실행 (단안 비전 vs vision_radar_fusion 비교)
+# 2. 6종 적대적 3D 스트레스 시나리오 벤치마크 실행 (MetaDrive 12-시드 및 CARLA 0.9.16)
 python -m src.cli stress-bench --simulator metadrive --compare-fusion --actuator-realism
+python -m src.cli stress-bench --simulator metadrive --perception-mode vision_radar_fusion --episodes-per-scenario 2 --actuator-realism
+python -m src.cli stress-bench --simulator carla --perception-mode vision_radar_fusion --actuator-realism --auto-launch-carla
+
+# 3. 12-에피소드 다중 블록·다중 도시 실시간 A* 재탐색 및 순수 비전 맵리스 통합 벤치마크 실행
+python -m src.cli multiroute-bench --simulator both --auto-launch-carla --output-json logs/multiroute_benchmark_report.json
 
 # 4. CARLA 자동 서버 기동 + 멀티센서 융합 + 액추에이터 물리 지연 + SOTIF 결함 평가
 python -m src.cli eval --simulator carla --auto-launch-carla --perception-mode vision_radar_fusion --actuator-realism --fault-mode rain_streaks
 ```
-> **시뮬레이션 콕핏·제어 엔드포인트 (`FastAPI`):** `GET /cockpit` (실시간 인터랙티브 웹 대시보드), `WS /ws/sim` (실시간 카메라/레이더 BEV/안전 실드 스트림), `GET /v1/sim/status`, `POST /v1/sim/control` (시뮬레이터·시나리오·기상·결함 주입·액추에이터 리얼리즘·인지 모드 런타임 전환).
+> **시뮬레이션 콕핏·제어 엔드포인트 (`FastAPI`):** `GET /cockpit` (2D 클릭 내비게이션 도시 맵 `#navMapCanvas` 포함 실시간 대시보드), `WS /ws/sim` (실시간 카메라/레이더 BEV/활성 A\* 경로/안전 실드 스트림), `GET /v1/sim/status`, `POST /v1/sim/control` (시뮬레이터, CARLA 도시 `Town01_Opt`~`Town10HD_Opt`, MetaDrive `map_blocks`, 측위 모드 `hd_map`/`hybrid_fallback`/`mapless_vision`, 클릭 목적지 재탐색, 전방 도로 폐쇄 장애물 생성, `endless_tour`, 기상·결함·인지 모드 런타임 전환).
 
 ---
 
@@ -161,16 +164,25 @@ AutonomousVehicle/
 ├── src/
 │   ├── config.py                     # Pydantic v2 설정 검증기 및 `AV_*` 환경 변수 오버라이드 로더
 │   ├── schemas.py                    # NaN/Inf 정제가 포함된 타입 안전 런타임·FastAPI 입출력 계약
-│   ├── cli.py                        # 통합 CLI (`python -m src.cli` / `av-drive`: doctor, serve, export, benchmark-rust)
+│   ├── cli.py                        # 통합 CLI (`doctor`, `serve`, `cockpit`, `stress-bench`, `multiroute-bench`, `export`)
 │   ├── api/
-│   │   └── app.py                    # FastAPI 추론 서버 (`/healthz`, `/readyz`, `/v1/step`, `/v1/step/multipart`, `/metrics`)
+│   │   ├── app.py                    # FastAPI 추론 서버 (`/healthz`, `/readyz`, `/v1/step`, `/cockpit`, `/ws/sim`, `/metrics`)
+│   │   └── cockpit_ui.py             # 실시간 3D 웹 콕핏 대시보드 및 대화형 2D 클릭 내비게이션 A* 미니맵
+│   ├── sim/
+│   │   ├── sensor_fusion.py          # 360도 비전 + 4D 도플러 레이더 + 코너 BSM MultiSensorFusionTracker
+│   │   ├── mapless_corridor.py       # 무파라미터 MaplessVisionCorridorEstimator 및 HD맵 드롭아웃 무중단 인계
+│   │   ├── actuator_and_faults.py    # 1차 서보 지연·변화율·데드존 필터 및 SOTIF 센서/HD맵 결함 주입기
+│   │   ├── scenarios.py              # 적대적 3D 스트레스 시나리오 디렉터 및 RealisticSimEnvWrapper
+│   │   ├── metrics.py                # ISO 2631-1 저크 쾌적률, TTC/THW 및 CARLA Driving Score 계측기
+│   │   ├── studio.py                 # 비동기 실시간 시뮬레이션 웹소켓 스튜디오 매니저
+│   │   └── carla_launcher.py         # 로컬 CarlaUE4 서버 자동 탐색 및 생명주기 매니저
 │   ├── runtime/
 │   │   ├── engine.py                 # 스레드 안전 다중 세션 폐루프 DrivingRuntimeEngine 및 AEB 안전 폴백
 │   │   ├── metrics.py                # Prometheus 카운터/히스토그램 텔레메트리 및 JSON 런타임 통계
 │   │   └── export.py                 # 수치 오차 검증이 포함된 TorchScript·ONNX 익스포터
 │   ├── env/
-│   │   ├── carla_wrapper.py          # CARLA 0.9.16 동기 모드(20Hz), 14-노드 5차 스플라인, 3D AR HUD
-│   │   ├── metadrive_wrapper.py      # MetaDrive 래퍼 (100Hz 물리 스텝 + decision_repeat=5 -> 20Hz)
+│   │   ├── carla_wrapper.py          # CARLA 0.9.16 동기 모드(20Hz), P2P GlobalRoutePlanner A* 재탐색, 다중 도시, OBB 레이더
+│   │   ├── metadrive_wrapper.py      # MetaDrive 0.4.3 래퍼 (다중 블록 절차적 도로망, 실시간 재탐색, 곡선 탈출 리드 보상)
 │   │   └── expert_labeler.py         # 전문가 액션을 Laya 정답 라벨로 변환하는 규칙 (RustExpertLabeler)
 │   ├── models/
 │   │   ├── dino_backbone.py          # 동결 DINOv2 ViT-B/14 로드 및 패치 특징 추출 (86.58M)
@@ -187,13 +199,18 @@ AutonomousVehicle/
 │       └── logging_utils.py          # 구조화 JSON 및 콘솔 로거
 ├── tests/
 │   ├── test_v8_verification.py       # 15개 핵심 검증 테스트 (PyO3 Rust, OLS, AEB/ACC, Holm-Bonferroni, 01~04 파이프라인)
+│   ├── test_multiroute_and_mapless.py# 동적 A* P2P 재탐색, 도로 폐쇄 우회, 순수 맵리스 무누수 및 콕핏 UI 테스트
+│   ├── test_real_metadrive_and_cockpit.py # 실제 MetaDrive 3D 폐루프, 곡선 충돌 기하 및 웹소켓 콕핏 테스트
+│   ├── test_sim_fusion_and_metrics.py# 360도 비전-레이더 융합, SOTIF 결함, 액추에이터 지연 및 ISO 쾌적률 테스트
 │   ├── test_config_and_schemas.py    # Pydantic v2 설정 불변량 및 텔레메트리 정제 단위 테스트
 │   ├── test_rust_python_parity.py    # Rust 코어 vs 순수 Python 폴백 1:1 수치 정합성 테스트
 │   ├── test_runtime_and_api.py       # 스레드 안전 런타임 엔진, TorchScript 익스포트 및 FastAPI 엔드포인트 테스트
 │   └── test_cli_smoke.py             # 통합 CLI 스모크 테스트 (`doctor`, `benchmark-rust`, `export`)
 ├── scripts/
 │   ├── build_rust.py                 # 자동화된 Cargo 릴리스 빌드 및 백엔드 자가 진단 스크립트
-│   └── 01_collect_data.py .. 04_evaluate_sim.py
+│   ├── 01_collect_data.py .. 04_evaluate_sim.py
+│   ├── 05_stress_benchmark.py        # 실시간 3D 6종 적대적 스트레스 및 센서 퓨전 비교 벤치마크
+│   └── 06_multiroute_benchmark.py    # 실시간 3D 다중 블록·다중 도시 P2P A* 재탐색 및 맵리스 비전 벤치마크
 ├── pyproject.toml                    # PEP 621 패키지 메타데이터 및 `av-drive` 콘솔 엔트리포인트
 ├── Dockerfile / docker-compose.yml   # 멀티스테이지 컨테이너 빌드 및 Compose 서비스 구성
 ├── Makefile                          # 빌드, 테스트, 익스포트, 서빙 통합 타겟
@@ -242,6 +259,27 @@ AutonomousVehicle/
 | **단일 프레임 추론 지연 시간 ($\bar{v}=33.0\text{ km/h}$, 에피소드당 `415.3` 스텝 / `190.4 m`)** | $\le 40.0\text{ ms}$ | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **30.20 ms (33.1 FPS)** | **PASS** |
 | **목적지 도달 완주율: 10-Ep (`4,153` 스텝, `1,904 m`) / 50-Ep (`20,765` 스텝, `9,520 m`)** | $\ge 85.0\%$ | **100.0% (10/10)** / **96.0% (48/50**, CI $[86.3, 99.5]\%$) | **100.0% (10/10)** / **100.0% (50/50**; 진행률 98.7%) | **PASS** |
 | **독립 폐루프 테스트 $\text{ECE}_{\text{mean}}$ / NLL / Brier ($M=15$ 구간)** | $\le 0.0500$ | **0.0184 / 0.096 / 0.031** (센서 잡음) | **0.0000 / 0.041 / 0.012** (결정론적 GT) | **PASS** |
+
+### 5.4. 360° 비전–레이더–BSM 융합(`vision_radar_fusion`), 액추에이터 서보 물리 및 SOTIF 적대적 스트레스 벤치마크
+실제 3D **MetaDrive 0.4.3** 및 **CARLA 0.9.16** 물리 엔진에서 `ActuatorDynamicsFilter`(조향·가감속 1차 서보 지연, 변화율 제한, 데드존)와 `SOTIFSensorFaultInjector`(`rain_streaks`, `sun_glare`, `camera_dropout`)를 활성화하여 측정한 결과:
+
+| 적대적 스트레스 벤치마크 스위트 (`ActuatorRealism = ON`) | 무사고율 (Crash-Free) | 평균 주행 점수 (DS) | Min TTC | ISO 2631-1 쾌적률 | 평균 추론 지연 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **MetaDrive 6대 시나리오 단안 비전 단독 (`vision_estimated`)** | 50.0% (3/6) | 56.2% | $0.13\text{ s}$ | 87.3% | $36.5\text{ ms}$ |
+| **MetaDrive 6대 시나리오 360° 레이더/BSM 융합 (`vision_radar_fusion`)** | **100.0% (6/6)** | **95.8%** | **$1.47\text{ s}$** | **81.9%** | **$36.4\text{ ms}$** |
+| **MetaDrive 미학습 12개 절차적 시드 (`5000`~`5011`, `vision_radar_fusion`)** | **100.0% (12/12)** | **92.0%** | **$1.34\text{ s}$** | **84.5%** | **$35.7\text{ ms}$** |
+| **CARLA 0.9.16 (`Town10HD_Opt`) 6대 적대적 시나리오 (`vision_radar_fusion`)** | **100.0% (6/6)** | **100.0%** | **$2.43\text{ s}$** | **85.9%** | **$35.5\text{ ms}$** |
+
+### 5.5. 다중 블록·다중 도시 동적 A\* 재탐색 및 무파라미터 순수 비전 맵리스 벤치마크 (`multiroute-bench`)
+MetaDrive 3-블록 연속 절차적 도로망, CARLA 3개 도시(`Town10HD_Opt`, `Town03_Opt`, `Town04_Opt`), 주행 중 실시간 목적지 변경, 고속도로 물리 장애물 5차 S-커브 우회 후 A\* 재접합, 시뮬레이터 횡방향 HD맵 참조 0건의 순수 비전 `mapless_vision`, 주행 중 `hd_map_dropout` 무중단 폴백을 포함한 **12개 실시간 3D 에피소드** 평가 결과:
+
+| 평가 스위트 (`ActuatorRealism = ON`, `4,232,991` 가중치 불변) | 에피소드 | 무사고율 | 평균 진행률 / 완주 | 실시간 A\* 재탐색 | 평균 주행 점수 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **MetaDrive 3-블록 절차적 도로망 + 주행 중 실시간 출구 재탐색** | 4 | **100.0% (4/4)** | **91.2%** | 1회 | **91.2%** |
+| **MetaDrive 순수 `mapless_vision` (T-교차로·곡선) + `hd_map_dropout`** | 3 | **100.0% (3/3)** | **100.0% 전원 완주 (3/3)** | 0회 | **100.0%** |
+| **CARLA 3개 도시 P2P (`Town10HD`, `Town03`, `Town04` 도로 폐쇄 우회)** | 3 | **100.0% (3/3)** | **64.9% (720스텝)** | **5회** | **63.7%** |
+| **CARLA `Town10HD_Opt` 순수 `mapless_vision` + 주행 중 `hd_map_dropout`** | 2 | **100.0% (2/2)** | **100.0% 전원 완주 (2/2)** | 0회 | **68.8%** |
+| **전체 통합 (`python -m src.cli multiroute-bench --simulator both`)** | **12** | **100.0% (12/12)** | **88.3%** | **6회** | **82.8%** ($36.1\text{ ms}$) |
 
 ---
 

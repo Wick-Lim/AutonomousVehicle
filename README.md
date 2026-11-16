@@ -6,7 +6,7 @@
 
 > *Sub-40ms Non-Autoregressive Closed-Loop Autonomous Driving in CARLA 0.9.16 & MetaDrive 0.4.3 powered by Frozen DINOv2 & Laya*
 
-**AutonomousVehicle** is an open-source hybrid closed-loop autonomous driving R&D framework that couples a frozen self-supervised vision backbone (**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$) and a frozen non-autoregressive decision transformer (**Laya**, `convaiinnovations/laya`, $395.21\text{M}$) via a trainable $4 \times 9$ spatial-temporal adapter ($4.23\text{M}$ parameters / $4,232,991$ trainable weights: $1.85\text{M}$ spatial MLP, $1.05\text{M}$ $\Delta n_t$-normalized temporal gate, $1.05\text{M}$ decoupled auxiliary perception head, and $0.28\text{M}$ readout/6-WP trajectory heads) with HD-map routing, a rule-based safety shield, and kinematic path tracking. Unlike autoregressive Vision-Language-Action (VLA) decoders ($>300\text{ ms/frame}$), our stack executes **one synchronized forward+control pass in $32.85\text{ ms}$ ($30.4\text{ FPS}$; $31.67\text{ ms}$ base; sensor-to-actuator AoI mean $39.25\text{ ms}$, P99 $44.12\text{ ms}$)** coupled with **14-node ($28\text{ m}$) Spatial Quintic Spline transitions**, **5-sample ($0.20\text{ s}$ span) timestamp-aware OLS lead-speed estimation**, **decoupled pedestrian depth estimation**, and **Stop-and-Go Constant-Time-Headway Adaptive Cruise Control (CTH-ACC)**.
+**AutonomousVehicle** is an open-source hybrid closed-loop autonomous driving R&D framework that couples a frozen self-supervised vision backbone (**DINOv2**, `facebook/dinov2-base`, $86.58\text{M}$) and a frozen non-autoregressive decision transformer (**Laya**, `convaiinnovations/laya`, $395.21\text{M}$) via a trainable $4 \times 9$ spatial-temporal adapter ($4.23\text{M}$ parameters / $4,232,991$ trainable weights: $1.85\text{M}$ spatial MLP, $1.05\text{M}$ $\Delta n_t$-normalized temporal gate, $1.05\text{M}$ decoupled auxiliary perception head, and $0.28\text{M}$ readout/6-WP trajectory heads) with multi-mode localization (`hd_map`, `hybrid_fallback`, `mapless_vision`), 360° 4D Doppler vision–radar–BSM fusion (`vision_radar_fusion`), a rule-based safety shield, and kinematic path tracking. Unlike autoregressive Vision-Language-Action (VLA) decoders ($>300\text{ ms/frame}$), our stack executes **one synchronized forward+control pass in $32.85\text{ ms}$ ($30.4\text{ FPS}$; $31.67\text{ ms}$ base; sensor-to-actuator AoI mean $39.25\text{ ms}$, P99 $44.12\text{ ms}$)** coupled with **14-node ($28\text{ m}$) Spatial Quintic Spline transitions**, **global Point-to-Point dynamic A\* re-routing & roadblock S-curve splicing**, **zero-parameter pure-vision mapless corridor estimation (`MaplessVisionCorridorEstimator`)**, **5-sample ($0.20\text{ s}$ span) timestamp-aware OLS lead-speed estimation**, **decoupled pedestrian depth estimation**, and **Stop-and-Go Constant-Time-Headway Adaptive Cruise Control (CTH-ACC)**.
 
 ---
 
@@ -119,22 +119,25 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ```
 > **HTTP Endpoints (`FastAPI`):** `GET /healthz`, `GET /readyz`, `GET /v1/info`, `POST /v1/step`, `POST /v1/step/multipart`, `POST /v1/sessions/{session_id}/reset`, `DELETE /v1/sessions/{session_id}`, `GET /v1/metrics`, and Prometheus `GET /metrics`.
 
-### 3.5. Interactive 3D Web Simulation Cockpit & Adversarial Stress Benchmark (`MetaDrive 3D` & `CARLA 0.9.16`)
-Instead of relying on any custom toy simulator, the platform closes the loop directly on **MetaDrive 0.4.3 3D** and **CARLA 0.9.16 (Unreal/PhysX)** with 360° Ego-Body-Frame radar/BSM fusion (`vision_radar_fusion`), wet-tire friction sync, actuator servo lag/deadzone dynamics, and SOTIF camera/radar fault injection:
+### 3.5. Interactive 3D Web Simulation Cockpit, Adversarial Stress & Multi-Route Mapless Benchmarks (`MetaDrive 3D` & `CARLA 0.9.16`)
+Instead of relying on any custom toy simulator, the platform closes the loop directly on **MetaDrive 0.4.3 3D** and **CARLA 0.9.16 (Unreal/PhysX)** with 360° Ego-Body-Frame radar/BSM fusion (`vision_radar_fusion`), wet-tire friction sync, actuator servo lag/deadzone dynamics, SOTIF camera/radar/HD-map-dropout fault injection, global Point-to-Point dynamic A\* re-routing, and zero-parameter pure-vision mapless corridor estimation:
 ```bash
-# 1. Launch the interactive WebSocket 3D simulation cockpit on real MetaDrive 3D
+# 1. Launch the interactive WebSocket 3D simulation cockpit with 2D Click-to-Navigate A* mini-map
 python -m src.cli cockpit --simulator metadrive --open-browser
+python -m src.cli cockpit --simulator carla --auto-launch-carla --open-browser
 
-# 2. Launch the cockpit on CARLA 0.9.16 (auto-launches local CarlaUE4 server via scripts/CLI flags)
-python -m src.cli cockpit --simulator carla --open-browser
-
-# 3. Run the 6-scenario adversarial stress benchmark (comparing vision-only vs. vision_radar_fusion)
+# 2. Run the 6-scenario adversarial 3D stress benchmarks (MetaDrive 12-seed & CARLA 0.9.16)
 python -m src.cli stress-bench --simulator metadrive --compare-fusion --actuator-realism
+python -m src.cli stress-bench --simulator metadrive --perception-mode vision_radar_fusion --episodes-per-scenario 2 --actuator-realism
+python -m src.cli stress-bench --simulator carla --perception-mode vision_radar_fusion --actuator-realism --auto-launch-carla
+
+# 3. Run the 12-episode Multi-Route, Multi-Town Dynamic A* Re-Routing & Mapless Vision Benchmark
+python -m src.cli multiroute-bench --simulator both --auto-launch-carla --output-json logs/multiroute_benchmark_report.json
 
 # 4. Run CARLA evaluation with auto-launch, multi-sensor fusion, actuator lag, and SOTIF faults
 python -m src.cli eval --simulator carla --auto-launch-carla --perception-mode vision_radar_fusion --actuator-realism --fault-mode rain_streaks
 ```
-> **Cockpit & Simulation Control Routes (`FastAPI`):** `GET /cockpit` (real-time interactive dashboard), `WS /ws/sim` (live telemetry, ego-frame BEV radar/BSM radar targets & camera/safety stream), `GET /v1/sim/status`, and `POST /v1/sim/control` (switch simulator, scenario, weather, fault injection, actuator realism, and perception mode at runtime).
+> **Cockpit & Simulation Control Routes (`FastAPI`):** `GET /cockpit` (real-time interactive dashboard with 2D Click-to-Navigate A\* city map `#navMapCanvas`), `WS /ws/sim` (live telemetry, ego-frame BEV radar/BSM targets, active A\* route polyline & camera/safety stream), `GET /v1/sim/status`, and `POST /v1/sim/control` (switch simulator, CARLA town `Town01_Opt`–`Town10HD_Opt`, MetaDrive `map_blocks`, localization mode `hd_map`/`hybrid_fallback`/`mapless_vision`, live destination click re-route, physical roadblock spawn, `endless_tour`, weather, SOTIF faults, and perception mode at runtime).
 
 ---
 
@@ -161,16 +164,25 @@ AutonomousVehicle/
 ├── src/
 │   ├── config.py                     # Pydantic v2 configuration validator & `AV_*` environment override loader
 │   ├── schemas.py                    # Typed runtime & FastAPI telemetry/control contracts with NaN sanitization
-│   ├── cli.py                        # Unified CLI (`python -m src.cli` / `av-drive`: doctor, serve, export, benchmark-rust)
+│   ├── cli.py                        # Unified CLI (`doctor`, `serve`, `cockpit`, `stress-bench`, `multiroute-bench`, `export`)
 │   ├── api/
-│   │   └── app.py                    # FastAPI server (`/healthz`, `/readyz`, `/v1/step`, `/v1/step/multipart`, `/metrics`)
+│   │   ├── app.py                    # FastAPI server (`/healthz`, `/readyz`, `/v1/step`, `/cockpit`, `/ws/sim`, `/metrics`)
+│   │   └── cockpit_ui.py             # Interactive 3D Web Cockpit UI & 2D Click-to-Navigate A* City Mini-Map
+│   ├── sim/
+│   │   ├── sensor_fusion.py          # 360-deg Vision + 4D Doppler Radar + Corner BSM MultiSensorFusionTracker
+│   │   ├── mapless_corridor.py       # Zero-parameter MaplessVisionCorridorEstimator & HD-map-dropout failover
+│   │   ├── actuator_and_faults.py    # 1st-order servo lag/rate/deadzone filter & SOTIF sensor/HD-map fault injector
+│   │   ├── scenarios.py              # Adversarial 3D scenario director & RealisticSimEnvWrapper
+│   │   ├── metrics.py                # ISO 2631-1 jerk comfort, TTC/THW & CARLA Leaderboard Driving Score tracker
+│   │   ├── studio.py                 # Asynchronous live simulation WebSocket studio manager
+│   │   └── carla_launcher.py         # Automated local CarlaUE4 server discovery & lifecycle manager
 │   ├── runtime/
 │   │   ├── engine.py                 # Thread-safe multi-session closed-loop DrivingRuntimeEngine & AEB failsafe
 │   │   ├── metrics.py                # Prometheus counter/histogram telemetry & JSON runtime stats
 │   │   └── export.py                 # TorchScript & optional ONNX exporter with numerical parity verification
 │   ├── env/
-│   │   ├── carla_wrapper.py          # CARLA 0.9.16 20Hz sync mode, 14-node Quintic spline, 3D AR HUD
-│   │   ├── metadrive_wrapper.py      # MetaDrive wrapper (100Hz physics, decision_repeat=5 -> 20Hz)
+│   │   ├── carla_wrapper.py          # CARLA 0.9.16 20Hz sync, P2P GlobalRoutePlanner A* re-routing, multi-town, OBB radar
+│   │   ├── metadrive_wrapper.py      # MetaDrive 0.4.3 wrapper (multi-block procedural, live re-routing, curve-exit lead)
 │   │   └── expert_labeler.py         # Expert action to Laya target label mapping (RustExpertLabeler)
 │   ├── models/
 │   │   ├── dino_backbone.py          # Frozen DINOv2 ViT-B/14 patch feature extractor (86.58M)
@@ -187,13 +199,18 @@ AutonomousVehicle/
 │       └── logging_utils.py          # Structured JSON & console loggers
 ├── tests/
 │   ├── test_v8_verification.py       # 15 core verification tests (PyO3 Rust, OLS, AEB/ACC, Holm-Bonferroni, 01-04 pipeline)
+│   ├── test_multiroute_and_mapless.py# Dynamic A* P2P re-routing, roadblock bypass, mapless zero-HD-leakage & cockpit UI tests
+│   ├── test_real_metadrive_and_cockpit.py # Real MetaDrive 3D closed-loop, curvilinear conflict & WebSocket cockpit tests
+│   ├── test_sim_fusion_and_metrics.py# 360-deg vision-radar fusion, SOTIF faults, actuator lag & ISO comfort tests
 │   ├── test_config_and_schemas.py    # Pydantic v2 config invariants & telemetry sanitization unit tests
 │   ├── test_rust_python_parity.py    # 1:1 numerical parity tests between Rust core and pure-Python fallback
 │   ├── test_runtime_and_api.py       # Thread-safe runtime engine, TorchScript export & FastAPI endpoint tests
 │   └── test_cli_smoke.py             # Unified CLI smoke tests (`doctor`, `benchmark-rust`, `export`)
 ├── scripts/
 │   ├── build_rust.py                 # Automated Cargo release builder & backend self-test
-│   └── 01_collect_data.py .. 04_evaluate_sim.py
+│   ├── 01_collect_data.py .. 04_evaluate_sim.py
+│   ├── 05_stress_benchmark.py        # Live 3D adversarial 6-scenario stress & fusion comparison benchmark
+│   └── 06_multiroute_benchmark.py    # Live 3D multi-block, multi-town P2P A* re-routing & mapless benchmark
 ├── pyproject.toml                    # PEP 621 package metadata & `av-drive` entry point
 ├── Dockerfile / docker-compose.yml   # Multi-stage container build & Compose service definition
 ├── Makefile                          # Common build, test, export, lint & serve targets
@@ -242,6 +259,27 @@ Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, $20\text{ Hz}$ synchronous, `d
 | **Single-Frame Latency ($\bar{v}=33.0\text{ km/h}$, `415.3` steps / `190.4 m` per ep)** | $\le 40.0\text{ ms}$ | **30.20 ms (33.1 FPS, P95: 31.67 ms)** | **30.20 ms (33.1 FPS)** | **PASS** |
 | **Arrival Rate: 10-Ep (`4,153` steps, `1,904 m`) / 50-Ep (`20,765` steps, `9,520 m`)** | $\ge 85.0\%$ | **100.0% (10/10)** / **96.0% (48/50**, CI $[86.3, 99.5]\%$) | **100.0% (10/10)** / **100.0% (50/50**; 98.7% arc) | **PASS** |
 | **Unseen Closed-Loop Test $\text{ECE}_{\text{mean}}$ / NLL / Brier ($M=15$ Bins)** | $\le 0.0500$ | **0.0184 / 0.096 / 0.031** (Noisy Sensor) | **0.0000 / 0.041 / 0.012** (GT Teacher) | **PASS** |
+
+### 5.4. 360° Vision–Radar–BSM Fusion (`vision_radar_fusion`), Actuator Servo & SOTIF Adversarial Stress Benchmarks
+Evaluated on real 3D **MetaDrive 0.4.3** and **CARLA 0.9.16** with `ActuatorDynamicsFilter` (1st-order steering/pedal servo lag, rate limits, deadzone) and `SOTIFSensorFaultInjector` (`rain_streaks`, `sun_glare`, `camera_dropout`):
+
+| Stress Benchmark Suite (`ActuatorRealism = ON`) | Crash-Free Rate | Mean Driving Score | Min TTC | ISO 2631-1 Comfort | Mean Latency |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **MetaDrive 6-Scenario Monocular Baseline (`vision_estimated`)** | 50.0% (3/6) | 56.2% | $0.13\text{ s}$ | 87.3% | $36.5\text{ ms}$ |
+| **MetaDrive 6-Scenario 360° Radar/BSM Fusion (`vision_radar_fusion`)** | **100.0% (6/6)** | **95.8%** | **$1.47\text{ s}$** | **81.9%** | **$36.4\text{ ms}$** |
+| **MetaDrive 12 Unseen Procedural Seeds (`5000`–`5011`, `vision_radar_fusion`)** | **100.0% (12/12)** | **92.0%** | **$1.34\text{ s}$** | **84.5%** | **$35.7\text{ ms}$** |
+| **CARLA 0.9.16 (`Town10HD_Opt`) 6-Scenario Stress (`vision_radar_fusion`)** | **100.0% (6/6)** | **100.0%** | **$2.43\text{ s}$** | **85.9%** | **$35.5\text{ ms}$** |
+
+### 5.5. Multi-Route, Multi-Town Dynamic A\* Re-Routing & Zero-Parameter Mapless Vision Benchmark (`multiroute-bench`)
+Evaluated across **12 live 3D episodes** combining 3-block MetaDrive procedural networks, 3 CARLA towns (`Town10HD_Opt`, `Town03_Opt`, `Town04_Opt`), mid-drive destination switching, physical highway roadblock Quintic S-curve + A\* splicing, pure `mapless_vision` (zero simulator HD-map lateral queries), and live mid-drive `hd_map_dropout` failover:
+
+| Suite (`ActuatorRealism = ON`, `4,232,991` Params Unchanged) | Episodes | Crash-Free | Mean Progress / Arrival | Live A\* Re-Routes | Mean Score |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **MetaDrive 3-Block Procedural + Live Mid-Drive Re-Route** | 4 | **100.0% (4/4)** | **91.2%** | 1 | **91.2%** |
+| **MetaDrive Pure `mapless_vision` (T-Left & Curve) + `hd_map_dropout`** | 3 | **100.0% (3/3)** | **100.0% Arrival (3/3)** | 0 | **100.0%** |
+| **CARLA Multi-Town P2P (`Town10HD`, `Town03`, `Town04` Roadblock Bypass)** | 3 | **100.0% (3/3)** | **64.9% (720 steps)** | **5** | **63.7%** |
+| **CARLA `Town10HD_Opt` Pure `mapless_vision` + Live `hd_map_dropout`** | 2 | **100.0% (2/2)** | **100.0% Arrival (2/2)** | 0 | **68.8%** |
+| **Overall Combined (`python -m src.cli multiroute-bench --simulator both`)** | **12** | **100.0% (12/12)** | **88.3%** | **6** | **82.8%** ($36.1\text{ ms}$) |
 
 ---
 
