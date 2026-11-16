@@ -1,7 +1,7 @@
 # 🚗 AutonomousVehicle
 
 <p align="center">
-  <b>🇺🇸 English</b> &nbsp;|&nbsp; <a href="README.ko.md">🇰🇷 한국어</a> &nbsp;|&nbsp; <a href="paper/main.pdf">📕 Paper (PDF EN)</a> &nbsp;|&nbsp; <a href="paper/main_ko.pdf">📕 논문 (PDF KO)</a> &nbsp;|&nbsp; <a href="paper/main.tex">📄 LaTeX Source</a>
+  <b>🇺🇸 English</b> &nbsp;|&nbsp; <a href="README.ko.md">🇰🇷 한국어</a> &nbsp;|&nbsp; <a href="https://www.alphaxiv.org/abs/2610.dino-laya-closed-loop-driving">📰 alphaXiv</a> &nbsp;|&nbsp; <a href="paper/main.pdf">📕 Paper (PDF EN)</a> &nbsp;|&nbsp; <a href="paper/main_ko.pdf">📕 논문 (PDF KO)</a> &nbsp;|&nbsp; <a href="paper/main.tex">📄 LaTeX Source</a>
 </p>
 
 > *Sub-40ms Non-Autoregressive Closed-Loop Autonomous Driving in CARLA 0.9.16 & MetaDrive 0.4.3 powered by Frozen DINOv2 & Laya*
@@ -98,6 +98,44 @@ python scripts/03_calibrate.py
 python scripts/04_evaluate_sim.py --perception-mode vision_estimated --episodes 100
 ```
 
+### 3.4. Production Build, Unified CLI, FastAPI Service & Docker
+```bash
+# 1. Compile and verify the native PyO3 Rust safety shield core (cross-platform Linux/macOS/Windows)
+python scripts/build_rust.py
+
+# 2. System diagnostics (validated Pydantic v2 config, Rust/Python fallback benchmark, exact 4,232,991 parameter check)
+python -m src.cli doctor --json
+python -m src.cli benchmark-rust --iterations 10000
+
+# 3. Export SpatialProjector to TorchScript and verify numerical parity
+python -m src.cli export --mock --format torchscript --output checkpoints/spatial_projector_ts.pt
+
+# 4. Launch production FastAPI inference server (or via Docker Compose)
+python -m src.cli serve --host 0.0.0.0 --port 8000 --mock
+docker compose up --build
+
+# 5. Run the complete unit, parity, runtime, API, CLI & E2E test suites
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+> **HTTP Endpoints (`FastAPI`):** `GET /healthz`, `GET /readyz`, `GET /v1/info`, `POST /v1/step`, `POST /v1/step/multipart`, `POST /v1/sessions/{session_id}/reset`, `DELETE /v1/sessions/{session_id}`, `GET /v1/metrics`, and Prometheus `GET /metrics`.
+
+### 3.5. Interactive 3D Web Simulation Cockpit & Adversarial Stress Benchmark (`MetaDrive 3D` & `CARLA 0.9.16`)
+Instead of relying on any custom toy simulator, the platform closes the loop directly on **MetaDrive 0.4.3 3D** and **CARLA 0.9.16 (Unreal/PhysX)** with 360° Ego-Body-Frame radar/BSM fusion (`vision_radar_fusion`), wet-tire friction sync, actuator servo lag/deadzone dynamics, and SOTIF camera/radar fault injection:
+```bash
+# 1. Launch the interactive WebSocket 3D simulation cockpit on real MetaDrive 3D
+python -m src.cli cockpit --simulator metadrive --open-browser
+
+# 2. Launch the cockpit on CARLA 0.9.16 (auto-launches local CarlaUE4 server via scripts/CLI flags)
+python -m src.cli cockpit --simulator carla --open-browser
+
+# 3. Run the 6-scenario adversarial stress benchmark (comparing vision-only vs. vision_radar_fusion)
+python -m src.cli stress-bench --simulator metadrive --compare-fusion --actuator-realism
+
+# 4. Run CARLA evaluation with auto-launch, multi-sensor fusion, actuator lag, and SOTIF faults
+python -m src.cli eval --simulator carla --auto-launch-carla --perception-mode vision_radar_fusion --actuator-realism --fault-mode rain_streaks
+```
+> **Cockpit & Simulation Control Routes (`FastAPI`):** `GET /cockpit` (real-time interactive dashboard), `WS /ws/sim` (live telemetry, ego-frame BEV radar/BSM radar targets & camera/safety stream), `GET /v1/sim/status`, and `POST /v1/sim/control` (switch simulator, scenario, weather, fault injection, actuator realism, and perception mode at runtime).
+
 ---
 
 ## 4. Repository Structure
@@ -118,9 +156,18 @@ AutonomousVehicle/
 │   └── default.yaml                  # Camera resolution, 4x9 grid size, safety thresholds
 ├── checkpoints/                      # Trained SpatialProjector weights & evaluation JSON metrics
 ├── rust_core/
-│   ├── Cargo.toml                    # PyO3 native Rust crate (`autonomous_vehicle_rust`)
-│   └── src/lib.rs                    # RustSafetyShieldPID, RustExpertLabeler, Timestamp OLS, Quintic S-Curve (12.8x PyO3 / 338x pure core)
+│   ├── Cargo.toml                    # PyO3 native Rust crate (`autonomous_vehicle_rust`) with Cargo test feature split
+│   └── src/lib.rs                    # RustSafetyShieldPID, RustExpertLabeler, Timestamp OLS, Quintic S-Curve, NaN/Inf guards
 ├── src/
+│   ├── config.py                     # Pydantic v2 configuration validator & `AV_*` environment override loader
+│   ├── schemas.py                    # Typed runtime & FastAPI telemetry/control contracts with NaN sanitization
+│   ├── cli.py                        # Unified CLI (`python -m src.cli` / `av-drive`: doctor, serve, export, benchmark-rust)
+│   ├── api/
+│   │   └── app.py                    # FastAPI server (`/healthz`, `/readyz`, `/v1/step`, `/v1/step/multipart`, `/metrics`)
+│   ├── runtime/
+│   │   ├── engine.py                 # Thread-safe multi-session closed-loop DrivingRuntimeEngine & AEB failsafe
+│   │   ├── metrics.py                # Prometheus counter/histogram telemetry & JSON runtime stats
+│   │   └── export.py                 # TorchScript & optional ONNX exporter with numerical parity verification
 │   ├── env/
 │   │   ├── carla_wrapper.py          # CARLA 0.9.16 20Hz sync mode, 14-node Quintic spline, 3D AR HUD
 │   │   ├── metadrive_wrapper.py      # MetaDrive wrapper (100Hz physics, decision_repeat=5 -> 20Hz)
@@ -128,16 +175,29 @@ AutonomousVehicle/
 │   ├── models/
 │   │   ├── dino_backbone.py          # Frozen DINOv2 ViT-B/14 patch feature extractor (86.58M)
 │   │   ├── spatial_projector.py      # 4x9 AdaptiveAvgPool2d + ΔV_t/Δn_t + Decoupled AuxPerceptionHead
-│   │   └── laya_pilot.py             # Frozen Laya (395.21M) + discrete & 6-WP trajectory heads
+│   │   └── laya_pilot.py             # Frozen Laya (395.21M) + discrete & 6-WP trajectory heads + v1.1 checkpoints
 │   ├── control/
-│   │   ├── rust_backend.py           # Dynamic loader for `autonomous_vehicle_rust` native extension
+│   │   ├── rust_backend.py           # Cross-platform `.so`/`.pyd`/`.dll` Rust loader with seamless pure-Python fallback
+│   │   ├── python_fallback.py        # Exact 1:1 pure-Python mirror of `autonomous_vehicle_rust`
 │   │   └── shield_pid.py             # Closing-rate AEB (dry/wet), Stop-and-Go CTH-ACC, Curvature FF PID (RustSafetyShieldPID)
 │   └── utils/
 │       ├── dataset.py                # Episode-block PyTorch Dataset & DataLoader
-│       └── calibration.py            # Temperature Scaling (ECE computation & L-BFGS optimization)
+│       ├── calibration.py            # Temperature Scaling (ECE computation & L-BFGS optimization)
+│       ├── seed.py                   # Deterministic seeding & GPU/CPU hardware environment telemetry
+│       └── logging_utils.py          # Structured JSON & console loggers
 ├── tests/
-│   └── test_v8_verification.py       # 15 verification unit & E2E tests (PyO3 Rust core, OLS, AEB/ACC crossover, Holm-Bonferroni, 01-04 pipeline)
-├── scripts/                          # 01_collect_data .. 04_evaluate_sim pipeline scripts
+│   ├── test_v8_verification.py       # 15 core verification tests (PyO3 Rust, OLS, AEB/ACC, Holm-Bonferroni, 01-04 pipeline)
+│   ├── test_config_and_schemas.py    # Pydantic v2 config invariants & telemetry sanitization unit tests
+│   ├── test_rust_python_parity.py    # 1:1 numerical parity tests between Rust core and pure-Python fallback
+│   ├── test_runtime_and_api.py       # Thread-safe runtime engine, TorchScript export & FastAPI endpoint tests
+│   └── test_cli_smoke.py             # Unified CLI smoke tests (`doctor`, `benchmark-rust`, `export`)
+├── scripts/
+│   ├── build_rust.py                 # Automated Cargo release builder & backend self-test
+│   └── 01_collect_data.py .. 04_evaluate_sim.py
+├── pyproject.toml                    # PEP 621 package metadata & `av-drive` entry point
+├── Dockerfile / docker-compose.yml   # Multi-stage container build & Compose service definition
+├── Makefile                          # Common build, test, export, lint & serve targets
+├── .github/workflows/ci.yml          # GitHub Actions CI (`cargo test`, Rust build, `unittest`)
 ├── README.md                         # Primary English README
 └── README.ko.md                      # Korean README
 ```
@@ -188,6 +248,7 @@ Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, $20\text{ Hz}$ synchronous, `d
 ## 6. Author & Citation
 
 * **Author:** **Wick-Lim** ([wicklim90@gmail.com](mailto:wicklim90@gmail.com))
+* **Paper (alphaXiv Exclusive):** [https://www.alphaxiv.org/abs/2610.dino-laya-closed-loop-driving](https://www.alphaxiv.org/abs/2610.dino-laya-closed-loop-driving)
 * **GitHub:** [https://github.com/Wick-Lim/AutonomousVehicle](https://github.com/Wick-Lim/AutonomousVehicle)
 
 ```bibtex
@@ -195,6 +256,7 @@ Evaluated live in **CARLA 0.9.16 (`CarlaUE4.exe`, $20\text{ Hz}$ synchronous, `d
   title   = {Real-Time Closed-Loop Driving with Frozen DINOv2-Laya Spatial Pooling and Quintic Path Tracking},
   author  = {Wick-Lim},
   year    = {2026},
-  url     = {https://github.com/Wick-Lim/AutonomousVehicle}
+  url     = {https://www.alphaxiv.org/abs/2610.dino-laya-closed-loop-driving},
+  note    = {Code available at https://github.com/Wick-Lim/AutonomousVehicle}
 }
 ```

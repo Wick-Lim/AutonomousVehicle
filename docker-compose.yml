@@ -1,0 +1,22 @@
+services:
+  av-inference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: autonomous-vehicle:1.0.0
+    container_name: av-inference
+    ports:
+      - "8000:8000"
+    environment:
+      - AV_LOG_FORMAT=json
+      - AV_USE_MOCK=true
+      - AV_REQUIRE_RUST=1
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./checkpoints:/app/checkpoints:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped

@@ -1,0 +1,57 @@
+name: AutonomousVehicle CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust-core:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting & Clippy
+        run: |
+          cargo fmt --manifest-path rust_core/Cargo.toml --all -- --check
+          cargo clippy --manifest-path rust_core/Cargo.toml --no-default-features -- -D warnings
+      - name: Run pure-Rust unit tests
+        run: cargo test --manifest-path rust_core/Cargo.toml --no-default-features
+      - name: Build PyO3 release extension
+        env:
+          PYO3_PYTHON: ${{ pythonLocation }}/python
+        run: python scripts/build_rust.py
+
+  python-suite:
+    needs: rust-core
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install runtime & API dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch transformers safetensors numpy opencv-python-headless Pillow PyYAML tqdm einops pydantic fastapi uvicorn prometheus-client python-multipart httpx
+      - name: Build Rust extension & verify doctor
+        run: |
+          python scripts/build_rust.py
+          python -m src.cli doctor
+      - name: Run v8 verification suite
+        run: python tests/test_v8_verification.py
+      - name: Run full unittest production suite
+        run: python -m unittest discover -s tests -p "test_*.py" -v

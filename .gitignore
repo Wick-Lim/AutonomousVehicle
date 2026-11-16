@@ -11,6 +11,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.pyd
+*.dll
 .Python
 build/
 develop-eggs/

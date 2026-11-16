@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from src.control.rust_backend import rust_core_module
+from src.control.rust_backend import get_backend
 
 MANEUVER_OPTIONS: Tuple[str, ...] = (
     "keep_lane",
@@ -52,17 +52,15 @@ class ExpertLabeler:
         aeb_distance_thresh_m: float = 13.5,
         follow_distance_thresh_m: float = 30.0,
         curve_curvature_thresh: float = 0.40,
+        require_rust: bool = False,
     ) -> None:
-        if rust_core_module is None:
-            raise RuntimeError(
-                "Rust extension `autonomous_vehicle_rust` is required. Build `rust_core` with `cargo build --release`."
-            )
+        backend = get_backend(require_rust=require_rust)
         self.lane_change_steer_thresh = float(lane_change_steer_thresh)
         self.aeb_decel_thresh = float(aeb_decel_thresh)
         self.aeb_distance_thresh_m = float(aeb_distance_thresh_m)
         self.follow_distance_thresh_m = float(follow_distance_thresh_m)
         self.curve_curvature_thresh = float(curve_curvature_thresh)
-        self._rust_labeler = rust_core_module.RustExpertLabeler(
+        self._rust_labeler = backend.RustExpertLabeler(
             self.lane_change_steer_thresh,
             self.aeb_decel_thresh,
             self.aeb_distance_thresh_m,

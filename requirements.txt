@@ -11,3 +11,8 @@ tqdm>=4.66.0
 einops>=0.7.0
 metadrive-simulator @ git+https://github.com/metadriverse/metadrive.git
 peft>=0.10.0
+pydantic>=2.0.0
+fastapi>=0.110.0
+uvicorn>=0.27.0
+prometheus-client>=0.20.0
+python-multipart>=0.0.9

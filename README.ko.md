@@ -1,7 +1,7 @@
 # 🚗 AutonomousVehicle
 
 <p align="center">
-  <a href="README.md">🇺🇸 English</a> &nbsp;|&nbsp; <b>🇰🇷 한국어</b> &nbsp;|&nbsp; <a href="paper/main_ko.pdf">📕 논문 (PDF KO)</a> &nbsp;|&nbsp; <a href="paper/main.pdf">📕 Paper (PDF EN)</a> &nbsp;|&nbsp; <a href="paper/main_ko.tex">📄 LaTeX Source</a>
+  <a href="README.md">🇺🇸 English</a> &nbsp;|&nbsp; <b>🇰🇷 한국어</b> &nbsp;|&nbsp; <a href="https://www.alphaxiv.org/abs/2610.dino-laya-closed-loop-driving">📰 alphaXiv</a> &nbsp;|&nbsp; <a href="paper/main_ko.pdf">📕 논문 (PDF KO)</a> &nbsp;|&nbsp; <a href="paper/main.pdf">📕 Paper (PDF EN)</a> &nbsp;|&nbsp; <a href="paper/main_ko.tex">📄 LaTeX Source</a>
 </p>
 
 > *Sub-40ms Non-Autoregressive Closed-Loop Autonomous Driving in CARLA 0.9.16 & MetaDrive 0.4.3 powered by Frozen DINOv2 & Laya*
@@ -98,6 +98,44 @@ python scripts/03_calibrate.py
 python scripts/04_evaluate_sim.py --perception-mode vision_estimated --episodes 100
 ```
 
+### 3.4. 프로덕션 빌드, 통합 CLI, FastAPI 추론 서버 및 Docker
+```bash
+# 1. 네이티브 PyO3 Rust 안전 실드 코어 빌드 및 자체 검증 (Linux/macOS/Windows 교차 플랫폼 지원)
+python scripts/build_rust.py
+
+# 2. 시스템 자가 진단 (Pydantic v2 설정 검증, Rust/Python 백엔드 벤치마크, 4,232,991 가중치 불변량 검사)
+python -m src.cli doctor --json
+python -m src.cli benchmark-rust --iterations 10000
+
+# 3. SpatialProjector TorchScript 내보내기 및 수치 정합성 검증
+python -m src.cli export --mock --format torchscript --output checkpoints/spatial_projector_ts.pt
+
+# 4. FastAPI 폐루프 추론 서버 실행 (또는 Docker Compose 실행)
+python -m src.cli serve --host 0.0.0.0 --port 8000 --mock
+docker compose up --build
+
+# 5. 전체 단위·수치정합성·런타임·API·CLI·E2E 검증 테스트 스위트 실행
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+> **제공 HTTP 엔드포인트 (`FastAPI`):** `GET /healthz`, `GET /readyz`, `GET /v1/info`, `POST /v1/step`, `POST /v1/step/multipart`, `POST /v1/sessions/{session_id}/reset`, `DELETE /v1/sessions/{session_id}`, `GET /v1/metrics`, Prometheus `GET /metrics`.
+
+### 3.5. 실시간 3D 웹 시뮬레이션 콕핏 및 극한 스트레스 벤치마크 (`MetaDrive 3D` & `CARLA 0.9.16`)
+자체 물리 엔진을 처음부터 새로 구현하지 않고, 실제 **MetaDrive 0.4.3 3D** 및 **CARLA 0.9.16 (Unreal/PhysX)** 위에 360° 자차(Ego) 좌표계 레이더/사각지대(BSM) 융합(`vision_radar_fusion`), 노면 마찰계수 동기화, 액추에이터 서보 지연·데드존 물리 모델, SOTIF 카메라/레이더 결함 주입을 통합했습니다:
+```bash
+# 1. 실제 MetaDrive 3D 기반 실시간 웹소켓 3D 시뮬레이션 콕핏 실행
+python -m src.cli cockpit --simulator metadrive --open-browser
+
+# 2. CARLA 0.9.16 기반 실시간 콕핏 실행
+python -m src.cli cockpit --simulator carla --open-browser
+
+# 3. 6종 극한 스트레스 시나리오 벤치마크 실행 (단안 비전 vs vision_radar_fusion 비교)
+python -m src.cli stress-bench --simulator metadrive --compare-fusion --actuator-realism
+
+# 4. CARLA 자동 서버 기동 + 멀티센서 융합 + 액추에이터 물리 지연 + SOTIF 결함 평가
+python -m src.cli eval --simulator carla --auto-launch-carla --perception-mode vision_radar_fusion --actuator-realism --fault-mode rain_streaks
+```
+> **시뮬레이션 콕핏·제어 엔드포인트 (`FastAPI`):** `GET /cockpit` (실시간 인터랙티브 웹 대시보드), `WS /ws/sim` (실시간 카메라/레이더 BEV/안전 실드 스트림), `GET /v1/sim/status`, `POST /v1/sim/control` (시뮬레이터·시나리오·기상·결함 주입·액추에이터 리얼리즘·인지 모드 런타임 전환).
+
 ---
 
 ## 4. 레포지토리 구조
@@ -118,9 +156,18 @@ AutonomousVehicle/
 │   └── default.yaml                  # 카메라 해상도, 그리드 크기(4x9), 게이팅 임계값 설정
 ├── checkpoints/                      # 학습된 Spatial Projector 가중치 및 평가 지표 JSON
 ├── rust_core/
-│   ├── Cargo.toml                    # PyO3 네이티브 Rust 크레이트 (`autonomous_vehicle_rust`)
-│   └── src/lib.rs                    # RustSafetyShieldPID, RustExpertLabeler, 타임스탬프 OLS, 5차 스플라인 (PyO3 12.8배 / 순수 코어 338배 가속)
+│   ├── Cargo.toml                    # Cargo test 피처 분리가 적용된 PyO3 네이티브 Rust 크레이트 (`autonomous_vehicle_rust`)
+│   └── src/lib.rs                    # RustSafetyShieldPID, RustExpertLabeler, 타임스탬프 OLS, 5차 스플라인, NaN/Inf 방어 로직
 ├── src/
+│   ├── config.py                     # Pydantic v2 설정 검증기 및 `AV_*` 환경 변수 오버라이드 로더
+│   ├── schemas.py                    # NaN/Inf 정제가 포함된 타입 안전 런타임·FastAPI 입출력 계약
+│   ├── cli.py                        # 통합 CLI (`python -m src.cli` / `av-drive`: doctor, serve, export, benchmark-rust)
+│   ├── api/
+│   │   └── app.py                    # FastAPI 추론 서버 (`/healthz`, `/readyz`, `/v1/step`, `/v1/step/multipart`, `/metrics`)
+│   ├── runtime/
+│   │   ├── engine.py                 # 스레드 안전 다중 세션 폐루프 DrivingRuntimeEngine 및 AEB 안전 폴백
+│   │   ├── metrics.py                # Prometheus 카운터/히스토그램 텔레메트리 및 JSON 런타임 통계
+│   │   └── export.py                 # 수치 오차 검증이 포함된 TorchScript·ONNX 익스포터
 │   ├── env/
 │   │   ├── carla_wrapper.py          # CARLA 0.9.16 동기 모드(20Hz), 14-노드 5차 스플라인, 3D AR HUD
 │   │   ├── metadrive_wrapper.py      # MetaDrive 래퍼 (100Hz 물리 스텝 + decision_repeat=5 -> 20Hz)
@@ -128,16 +175,29 @@ AutonomousVehicle/
 │   ├── models/
 │   │   ├── dino_backbone.py          # 동결 DINOv2 ViT-B/14 로드 및 패치 특징 추출 (86.58M)
 │   │   ├── spatial_projector.py      # 4x9 Adaptive Pooling + ΔV_t/Δn_t + 분리형 AuxPerceptionHead
-│   │   └── laya_pilot.py             # 동결 Laya (395.21M) + 이산 및 6-WP 궤적 헤드
+│   │   └── laya_pilot.py             # 동결 Laya (395.21M) + 이산/6-WP 궤적 헤드 + v1.1 원자적 체크포인트
 │   ├── control/
-│   │   ├── rust_backend.py           # `autonomous_vehicle_rust` 네이티브 확장 모듈 로더
+│   │   ├── rust_backend.py           # `.so`/`.pyd`/`.dll` 교차 플랫폼 Rust 로더 및 자동 Python 폴백
+│   │   ├── python_fallback.py        # `autonomous_vehicle_rust`의 1:1 순수 Python 정합 구현체
 │   │   └── shield_pid.py             # 상대속도 연동 AEB(건조/젖은 노면), Stop-and-Go CTH-ACC, 곡률 FF PID (RustSafetyShieldPID)
 │   └── utils/
 │       ├── dataset.py                # 에피소드 블록 분할 PyTorch Dataset & DataLoader
-│       └── calibration.py            # Temperature Scaling (ECE 계산 및 L-BFGS 최적화)
+│       ├── calibration.py            # Temperature Scaling (ECE 계산 및 L-BFGS 최적화)
+│       ├── seed.py                   # 결정론적 시드 고정 및 GPU/CPU 하드웨어 환경 프로파일링
+│       └── logging_utils.py          # 구조화 JSON 및 콘솔 로거
 ├── tests/
-│   └── test_v8_verification.py       # 15개 검증 단위·통합 테스트 (PyO3 Rust 코어, OLS, AEB/ACC 교차 영역, Holm-Bonferroni, 01~04 파이프라인)
-├── scripts/                          # 데이터 수집, 학습, 보정, 폐루프 평가 스크립트 (01~04)
+│   ├── test_v8_verification.py       # 15개 핵심 검증 테스트 (PyO3 Rust, OLS, AEB/ACC, Holm-Bonferroni, 01~04 파이프라인)
+│   ├── test_config_and_schemas.py    # Pydantic v2 설정 불변량 및 텔레메트리 정제 단위 테스트
+│   ├── test_rust_python_parity.py    # Rust 코어 vs 순수 Python 폴백 1:1 수치 정합성 테스트
+│   ├── test_runtime_and_api.py       # 스레드 안전 런타임 엔진, TorchScript 익스포트 및 FastAPI 엔드포인트 테스트
+│   └── test_cli_smoke.py             # 통합 CLI 스모크 테스트 (`doctor`, `benchmark-rust`, `export`)
+├── scripts/
+│   ├── build_rust.py                 # 자동화된 Cargo 릴리스 빌드 및 백엔드 자가 진단 스크립트
+│   └── 01_collect_data.py .. 04_evaluate_sim.py
+├── pyproject.toml                    # PEP 621 패키지 메타데이터 및 `av-drive` 콘솔 엔트리포인트
+├── Dockerfile / docker-compose.yml   # 멀티스테이지 컨테이너 빌드 및 Compose 서비스 구성
+├── Makefile                          # 빌드, 테스트, 익스포트, 서빙 통합 타겟
+├── .github/workflows/ci.yml          # GitHub Actions CI (`cargo test`, Rust 빌드, `unittest`)
 ├── README.md                         # 영문 메인 문서 (English README)
 └── README.ko.md                      # 국문 문서 (Korean README)
 ```
@@ -188,6 +248,7 @@ AutonomousVehicle/
 ## 6. 저자 및 인용 (Author & Citation)
 
 * **저자 (Author):** **Wick-Lim** ([wicklim90@gmail.com](mailto:wicklim90@gmail.com))
+* **논문 (alphaXiv Exclusive):** [https://www.alphaxiv.org/abs/2610.dino-laya-closed-loop-driving](https://www.alphaxiv.org/abs/2610.dino-laya-closed-loop-driving)
 * **GitHub:** [https://github.com/Wick-Lim/AutonomousVehicle](https://github.com/Wick-Lim/AutonomousVehicle)
 
 ```bibtex
@@ -195,6 +256,7 @@ AutonomousVehicle/
   title   = {Real-Time Closed-Loop Driving with Frozen DINOv2-Laya Spatial Pooling and Quintic Path Tracking},
   author  = {Wick-Lim},
   year    = {2026},
-  url     = {https://github.com/Wick-Lim/AutonomousVehicle}
+  url     = {https://www.alphaxiv.org/abs/2610.dino-laya-closed-loop-driving},
+  note    = {Code available at https://github.com/Wick-Lim/AutonomousVehicle}
 }
 ```

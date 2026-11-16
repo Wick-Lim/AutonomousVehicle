@@ -240,6 +240,7 @@ class SpatialProjector(nn.Module):
         self,
         patch_tokens: torch.Tensor,
         elapsed_steps: int = 1,
+        prev_visual_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""Transform DINOv2 patch tokens into 36 spatial-temporal visual tokens for Laya.
 
@@ -247,6 +248,8 @@ class SpatialProjector(nn.Module):
             patch_tokens: (B, 392, 768) or (B, 768, 14, 28) tensor.
             elapsed_steps: Number of elapsed 50ms control ticks since previous observed frame
                 (\Delta n_t >= 1) for step-normalized temporal residual \Delta V_t / \Delta n_t.
+            prev_visual_tokens: Optional caller-supplied previous frame tokens for isolated
+                multi-session temporal smoothing without mutating shared module state.
 
         Returns:
             visual_tokens: (B, 36, 1024) tensor ordered row-by-row over the 4x9 grid.
@@ -279,7 +282,25 @@ class SpatialProjector(nn.Module):
         visual_tokens = self.mlp(tokens_36)
 
         # Fuse step-normalized temporal motion residual (\Delta V_t = (V_t - V_{t-\Delta n_t}) / \Delta n_t)
-        if not self.training and visual_tokens.shape[0] == 1:
+        if prev_visual_tokens is not None:
+            ref_tokens = prev_visual_tokens.to(
+                device=visual_tokens.device, dtype=visual_tokens.dtype
+            )
+            if ref_tokens.shape == visual_tokens.shape:
+                step_scale = float(max(1, int(elapsed_steps)))
+                delta_v = (visual_tokens - ref_tokens) / step_scale
+                self._temporal_delta_norm = float(
+                    delta_v.detach().norm(dim=-1).mean().item()
+                )
+                gate = torch.tanh(self.temporal_gate)
+                visual_tokens = visual_tokens + gate * self.temporal_proj(delta_v)
+            else:
+                self._temporal_delta_norm = 0.0
+        elif (
+            not torch.jit.is_tracing()
+            and not self.training
+            and visual_tokens.shape[0] == 1
+        ):
             if (
                 self._prev_tokens is not None
                 and self._prev_tokens.shape == visual_tokens.shape

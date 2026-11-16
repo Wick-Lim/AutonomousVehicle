@@ -50,19 +50,22 @@ impl ScalarPidCore {
 
     #[inline]
     pub fn step(&mut self, error: f64, dt: f64) -> f64 {
+        if !error.is_finite() || !dt.is_finite() {
+            return 0.0;
+        }
         let derivative = match self.prev_error {
             Some(prev) if (error - prev).abs() > 1.2 => {
                 self.integral = 0.0;
                 0.0
             }
             Some(prev) => {
-                self.integral = (self.integral + error * dt)
-                    .clamp(-self.integral_limit, self.integral_limit);
+                self.integral =
+                    (self.integral + error * dt).clamp(-self.integral_limit, self.integral_limit);
                 (error - prev) / dt.max(1e-4)
             }
             None => {
-                self.integral = (self.integral + error * dt)
-                    .clamp(-self.integral_limit, self.integral_limit);
+                self.integral =
+                    (self.integral + error * dt).clamp(-self.integral_limit, self.integral_limit);
                 0.0
             }
         };
@@ -78,11 +81,31 @@ pub fn compute_kinematic_aeb_distance_core(
     a_max_mps2: f64,
     uncertainty_margin_m: f64,
 ) -> f64 {
-    let v_ego_mps = (current_speed_kmh / 3.6).max(0.0);
-    let v_lead_mps = (lead_speed_kmh / 3.6).max(0.0);
+    let cur_v = if current_speed_kmh.is_finite() {
+        current_speed_kmh
+    } else {
+        0.0
+    };
+    let lead_v = if lead_speed_kmh.is_finite() {
+        lead_speed_kmh
+    } else {
+        0.0
+    };
+    let amax = if a_max_mps2.is_finite() {
+        a_max_mps2
+    } else {
+        6.0
+    };
+    let unc = if uncertainty_margin_m.is_finite() {
+        uncertainty_margin_m
+    } else {
+        0.0
+    };
+    let v_ego_mps = (cur_v / 3.6).max(0.0);
+    let v_lead_mps = (lead_v / 3.6).max(0.0);
     let closing_mps = (v_ego_mps - v_lead_mps).max(0.0);
-    let eff_a_max = a_max_mps2.max(2.5);
-    5.5 + (v_ego_mps * v_ego_mps) / (2.0 * eff_a_max) + 0.45 * closing_mps + uncertainty_margin_m
+    let eff_a_max = amax.max(2.5);
+    5.5 + (v_ego_mps * v_ego_mps) / (2.0 * eff_a_max) + 0.45 * closing_mps + unc
 }
 
 #[inline]
@@ -153,6 +176,7 @@ pub struct SafetyShieldPidCore {
 }
 
 impl SafetyShieldPidCore {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         use_mock: bool,
         aeb_threshold: f64,
@@ -278,8 +302,7 @@ impl SafetyShieldPidCore {
             || traffic_light == "red"
             || ped_distance_m <= 16.0
             || (hazard_source == "pedestrian" && lead_distance_m <= 16.0)
-            || (lead_distance_m <= d_aeb_m
-                && current_speed_kmh > 6.0_f64.max(lead_speed_kmh + 6.0))
+            || (lead_distance_m <= d_aeb_m && current_speed_kmh > 6.0_f64.max(lead_speed_kmh + 6.0))
         {
             gated_maneuver = "keep_lane".to_string();
             gated_speed_level = 0;
@@ -323,8 +346,7 @@ impl SafetyShieldPidCore {
         let mut target_speed_kmh = speed_level_to_kmh(gated_speed_level);
         let road_curv_abs = road_curvature.abs();
         let effective_kappa = road_curv_abs * 0.065;
-        let mpc_cornering_cap_kmh =
-            65.0_f64.min(3.6 * (2.85 / effective_kappa.max(1e-3)).sqrt());
+        let mpc_cornering_cap_kmh = 65.0_f64.min(3.6 * (2.85 / effective_kappa.max(1e-3)).sqrt());
         if road_curv_abs > 0.22 && gated_speed_level > 0 {
             target_speed_kmh = target_speed_kmh.min(20.0_f64.max(mpc_cornering_cap_kmh));
         }
@@ -576,20 +598,33 @@ impl LeadSpeedOlsEstimatorCore {
         dt: f64,
     ) -> f64 {
         let steps = elapsed_steps.max(1) as f64;
-        self.obs_time_s += steps * dt;
+        let safe_dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.05 };
+        self.obs_time_s += steps * safe_dt;
+
+        let d_val = if pred_d.is_finite() { pred_d } else { 60.0 };
+        let rr_val = if pred_rr_mps.is_finite() {
+            pred_rr_mps
+        } else {
+            0.0
+        };
+        let v_ego = if ego_v_kmh.is_finite() {
+            ego_v_kmh
+        } else {
+            0.0
+        };
 
         if let Some(&(_, last_d)) = self.window.last() {
-            if (pred_d - last_d).abs() > 6.0 {
+            if (d_val - last_d).abs() > 6.0 {
                 self.window.clear();
             }
         }
-        self.window.push((self.obs_time_s, pred_d));
+        self.window.push((self.obs_time_s, d_val));
         if self.window.len() > 5 {
             self.window.remove(0);
         }
 
         let dd_dt_reg = if self.window.len() < 2 {
-            pred_rr_mps
+            rr_val
         } else {
             let n_f = self.window.len() as f64;
             let t_mean = self.window.iter().map(|pt| pt.0).sum::<f64>() / n_f;
@@ -604,8 +639,8 @@ impl LeadSpeedOlsEstimatorCore {
             num / den.max(1e-6)
         };
 
-        let dd_dt_fused = 0.70 * dd_dt_reg + 0.30 * pred_rr_mps;
-        let raw_v_lead = ego_v_kmh + 3.6 * dd_dt_fused;
+        let dd_dt_fused = 0.70 * dd_dt_reg + 0.30 * rr_val;
+        let raw_v_lead = v_ego + 3.6 * dd_dt_fused;
         let est_v_lead = (0.65 * self.prev_est_v_lead + 0.35 * raw_v_lead).clamp(0.0, 60.0);
         self.prev_est_v_lead = est_v_lead;
         est_v_lead
@@ -662,9 +697,7 @@ pub fn count_sustained_aeb_events_core(
     (events, total_ticks)
 }
 
-pub fn compute_polyline_tangents_core(
-    xyz_list: &[(f64, f64, f64)],
-) -> Vec<(f64, f64, f64, f64)> {
+pub fn compute_polyline_tangents_core(xyz_list: &[(f64, f64, f64)]) -> Vec<(f64, f64, f64, f64)> {
     let n = xyz_list.len();
     if n == 0 {
         return Vec::new();
@@ -861,7 +894,10 @@ impl RustLeadSpeedEstimator {
 
 fn extract_f64(dict: &PyDict, key: &str, default: f64) -> f64 {
     match dict.get_item(key) {
-        Ok(Some(v)) => v.extract::<f64>().unwrap_or(default),
+        Ok(Some(v)) => match v.extract::<f64>() {
+            Ok(val) if val.is_finite() => val,
+            _ => default,
+        },
         _ => default,
     }
 }
@@ -869,12 +905,16 @@ fn extract_f64(dict: &PyDict, key: &str, default: f64) -> f64 {
 fn extract_f64_2keys(dict: &PyDict, key1: &str, key2: &str, default: f64) -> f64 {
     if let Ok(Some(v)) = dict.get_item(key1) {
         if let Ok(val) = v.extract::<f64>() {
-            return val;
+            if val.is_finite() {
+                return val;
+            }
         }
     }
     if let Ok(Some(v)) = dict.get_item(key2) {
         if let Ok(val) = v.extract::<f64>() {
-            return val;
+            if val.is_finite() {
+                return val;
+            }
         }
     }
     default
@@ -896,7 +936,9 @@ fn extract_bool(dict: &PyDict, key: &str, default: bool) -> bool {
 
 fn extract_str(dict: &PyDict, key: &str, default: &str) -> String {
     match dict.get_item(key) {
-        Ok(Some(v)) => v.extract::<String>().unwrap_or_else(|_| default.to_string()),
+        Ok(Some(v)) => v
+            .extract::<String>()
+            .unwrap_or_else(|_| default.to_string()),
         _ => default.to_string(),
     }
 }
@@ -907,7 +949,7 @@ fn extract_wp2(decision: &PyDict) -> (f64, f64, bool) {
             if traj_list.len() >= 3 {
                 if let Ok(wp2_any) = traj_list.get_item(2) {
                     if let Ok(wp2_seq) = wp2_any.extract::<Vec<f64>>() {
-                        if wp2_seq.len() >= 2 {
+                        if wp2_seq.len() >= 2 && wp2_seq[0].is_finite() && wp2_seq[1].is_finite() {
                             return (wp2_seq[0], wp2_seq[1], true);
                         }
                     }
@@ -1025,7 +1067,11 @@ impl RustSafetyShieldPID {
 
         let lead_distance_m =
             extract_f64_2keys(telemetry, "lead_distance_m", "lead_distance", 60.0);
-        let has_lead_speed = telemetry.get_item("lead_speed_kmh").ok().flatten().is_some();
+        let has_lead_speed = telemetry
+            .get_item("lead_speed_kmh")
+            .ok()
+            .flatten()
+            .is_some();
         let lead_speed_kmh = extract_f64(telemetry, "lead_speed_kmh", 60.0);
         let ped_distance_m = extract_f64_2keys(
             telemetry,
@@ -1105,7 +1151,11 @@ impl RustSafetyShieldPID {
 
         let lead_distance_m =
             extract_f64_2keys(telemetry, "lead_distance_m", "lead_distance", 60.0);
-        let has_lead_speed = telemetry.get_item("lead_speed_kmh").ok().flatten().is_some();
+        let has_lead_speed = telemetry
+            .get_item("lead_speed_kmh")
+            .ok()
+            .flatten()
+            .is_some();
         let lead_speed_kmh = extract_f64(telemetry, "lead_speed_kmh", 60.0);
         let ped_distance_m = extract_f64_2keys(
             telemetry,
@@ -1253,9 +1303,7 @@ pub fn count_sustained_aeb_events(
 }
 
 #[pyfunction]
-pub fn compute_polyline_tangents(
-    xyz_list: Vec<(f64, f64, f64)>,
-) -> Vec<(f64, f64, f64, f64)> {
+pub fn compute_polyline_tangents(xyz_list: Vec<(f64, f64, f64)>) -> Vec<(f64, f64, f64, f64)> {
     compute_polyline_tangents_core(&xyz_list)
 }
 
@@ -1340,6 +1388,117 @@ pub struct RustExpertLabeler {
     pub curve_curvature_thresh: f64,
 }
 
+impl RustExpertLabeler {
+    #[allow(clippy::too_many_arguments)]
+    pub fn label_step_core(
+        &self,
+        speed_kmh: f64,
+        left_avail: bool,
+        right_avail: bool,
+        nav_command: &str,
+        lead_distance_m: f64,
+        road_curvature: f64,
+        scenario_event: &str,
+        traffic_light: &str,
+        hazard_source: &str,
+        expert_maneuver_in: &str,
+        steering: f64,
+        throttle_brake: f64,
+    ) -> (String, i64, i64, i64) {
+        let speed_kmh = if speed_kmh.is_finite() {
+            speed_kmh
+        } else {
+            0.0
+        };
+        let lead_distance_m = if lead_distance_m.is_finite() {
+            lead_distance_m
+        } else {
+            60.0
+        };
+        let road_curvature = if road_curvature.is_finite() {
+            road_curvature.abs()
+        } else {
+            0.0
+        };
+        let steering = if steering.is_finite() { steering } else { 0.0 };
+        let throttle_brake = if throttle_brake.is_finite() {
+            throttle_brake
+        } else {
+            0.0
+        };
+
+        let is_real_sim = scenario_event == "real_metadrive" || scenario_event == "real_carla";
+        let is_aeb = scenario_event == "emergency_brake"
+            || traffic_light == "red"
+            || (hazard_source == "pedestrian" && lead_distance_m <= 16.0)
+            || (!is_real_sim
+                && throttle_brake <= self.aeb_decel_thresh
+                && lead_distance_m <= self.aeb_distance_thresh_m)
+            || (lead_distance_m < 9.5 && speed_kmh > 15.0);
+        let emergency_brake: i64 = if is_aeb { 1 } else { 0 };
+
+        let expert_maneuver = expert_maneuver_in.to_string();
+
+        let maneuver = if matches!(
+            scenario_event,
+            "keep_lane" | "change_left" | "change_right" | "follow_lead"
+        ) {
+            scenario_event.to_string()
+        } else if expert_maneuver == "change_left" || expert_maneuver == "change_right" {
+            expert_maneuver
+        } else if is_aeb {
+            "follow_lead".to_string()
+        } else if !is_real_sim
+            && steering >= self.lane_change_steer_thresh
+            && left_avail
+            && road_curvature < self.curve_curvature_thresh
+        {
+            "change_left".to_string()
+        } else if !is_real_sim
+            && steering <= -self.lane_change_steer_thresh
+            && right_avail
+            && road_curvature < self.curve_curvature_thresh
+        {
+            "change_right".to_string()
+        } else if lead_distance_m <= self.follow_distance_thresh_m {
+            "follow_lead".to_string()
+        } else {
+            "keep_lane".to_string()
+        };
+
+        let maneuver_idx: i64 = match maneuver.as_str() {
+            "keep_lane" => 0,
+            "change_left" => 1,
+            "change_right" => 2,
+            "follow_lead" => 3,
+            _ => 0,
+        };
+
+        let speed_level: i64 = if emergency_brake == 1 {
+            0
+        } else if scenario_event == "sharp_curve" || road_curvature >= self.curve_curvature_thresh {
+            1
+        } else if matches!(
+            maneuver.as_str(),
+            "change_left" | "change_right" | "follow_lead"
+        ) || matches!(nav_command, "merge" | "turn_left" | "turn_right")
+            || road_curvature >= 0.22
+        {
+            if lead_distance_m > 16.0 {
+                2
+            } else {
+                1
+            }
+        } else if lead_distance_m >= 45.0 && road_curvature < 0.22 {
+            3
+        } else {
+            2
+        };
+
+        (maneuver, maneuver_idx, speed_level, emergency_brake)
+    }
+}
+
 #[pymethods]
 impl RustExpertLabeler {
     #[new]
@@ -1400,17 +1559,6 @@ impl RustExpertLabeler {
             "hazard_source",
             &extract_str(info, "hazard_source", "none"),
         );
-
-        let is_real_sim = scenario_event == "real_metadrive" || scenario_event == "real_carla";
-        let is_aeb = scenario_event == "emergency_brake"
-            || traffic_light == "red"
-            || (hazard_source == "pedestrian" && lead_distance_m <= 16.0)
-            || (!is_real_sim
-                && throttle_brake <= self.aeb_decel_thresh
-                && lead_distance_m <= self.aeb_distance_thresh_m)
-            || (lead_distance_m < 9.5 && speed_kmh > 15.0);
-        let emergency_brake: i64 = if is_aeb { 1 } else { 0 };
-
         let expert_maneuver_info = extract_str(info, "expert_maneuver", "");
         let expert_maneuver = if !expert_maneuver_info.is_empty() {
             expert_maneuver_info
@@ -1418,65 +1566,20 @@ impl RustExpertLabeler {
             extract_str(telemetry, "expert_maneuver", "")
         };
 
-        let maneuver = if matches!(
-            scenario_event.as_str(),
-            "keep_lane" | "change_left" | "change_right" | "follow_lead"
-        ) {
-            scenario_event.clone()
-        } else if expert_maneuver == "change_left" || expert_maneuver == "change_right" {
-            expert_maneuver
-        } else if is_aeb {
-            "follow_lead".to_string()
-        } else if !is_real_sim
-            && steering >= self.lane_change_steer_thresh
-            && left_avail
-            && road_curvature < self.curve_curvature_thresh
-        {
-            "change_left".to_string()
-        } else if !is_real_sim
-            && steering <= -self.lane_change_steer_thresh
-            && right_avail
-            && road_curvature < self.curve_curvature_thresh
-        {
-            "change_right".to_string()
-        } else if lead_distance_m <= self.follow_distance_thresh_m {
-            "follow_lead".to_string()
-        } else {
-            "keep_lane".to_string()
-        };
-
-        let maneuver_idx: i64 = match maneuver.as_str() {
-            "keep_lane" => 0,
-            "change_left" => 1,
-            "change_right" => 2,
-            "follow_lead" => 3,
-            _ => 0,
-        };
-
-        let speed_level: i64 = if emergency_brake == 1 {
-            0
-        } else if scenario_event == "sharp_curve" || road_curvature >= self.curve_curvature_thresh {
-            1
-        } else if matches!(
-            maneuver.as_str(),
-            "change_left" | "change_right" | "follow_lead"
-        ) || matches!(
-            nav_command.as_str(),
-            "merge" | "turn_left" | "turn_right"
-        ) || road_curvature >= 0.22
-        {
-            if lead_distance_m > 16.0 {
-                2
-            } else {
-                1
-            }
-        } else if lead_distance_m >= 45.0 && road_curvature < 0.22 {
-            3
-        } else {
-            2
-        };
-
-        (maneuver, maneuver_idx, speed_level, emergency_brake)
+        self.label_step_core(
+            speed_kmh,
+            left_avail,
+            right_avail,
+            &nav_command,
+            lead_distance_m,
+            road_curvature,
+            &scenario_event,
+            &traffic_light,
+            &hazard_source,
+            &expert_maneuver,
+            steering,
+            throttle_brake,
+        )
     }
 }
 
@@ -1496,4 +1599,294 @@ fn autonomous_vehicle_rust(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sample_continuous_route_pose, m)?)?;
     m.add_function(wrap_pyfunction!(benchmark_rust_control_loop_us, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scalar_pid_anti_windup_and_nan_safety() {
+        let mut pid = ScalarPidCore::new(0.5, 1.0, 0.1, 2.0);
+        for _ in 0..200 {
+            let out = pid.step(10.0, 0.05);
+            assert!(out.is_finite());
+        }
+        assert!((pid.integral - 2.0).abs() < 1e-9);
+        assert_eq!(pid.step(f64::NAN, 0.05), 0.0);
+        assert_eq!(pid.step(1.0, f64::INFINITY), 0.0);
+
+        // Derivative jump reset when |error - prev| > 1.2
+        pid.integral = 1.5;
+        pid.prev_error = Some(0.0);
+        let out_jump = pid.step(2.0, 0.05);
+        assert_eq!(pid.integral, 0.0);
+        assert!((out_jump - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_kinematic_aeb_distance_and_crossover() {
+        let d_dry_40 = compute_kinematic_aeb_distance_core(40.0, 0.0, 6.0, 0.0);
+        let d_star_40 = 8.0 + 1.2 * (40.0 / 3.6);
+        assert!(d_dry_40 < d_star_40);
+
+        let d_dry_50 = compute_kinematic_aeb_distance_core(50.0, 0.0, 6.0, 0.0);
+        let d_star_50 = 8.0 + 1.2 * (50.0 / 3.6);
+        assert!((d_dry_50 - 27.8302).abs() < 1e-2);
+        assert!(d_dry_50 > d_star_50);
+
+        let d_wet = compute_kinematic_aeb_distance_core(35.0, 0.0, 4.5, 1.8);
+        let d_dry_35 = compute_kinematic_aeb_distance_core(35.0, 0.0, 6.0, 0.0);
+        assert!(d_wet > d_dry_35 + 1.8);
+
+        let d_nan = compute_kinematic_aeb_distance_core(f64::NAN, 0.0, f64::NAN, f64::INFINITY);
+        assert!(d_nan.is_finite());
+    }
+
+    #[test]
+    fn test_safety_shield_rules_and_stop_and_go_hysteresis() {
+        let mut shield = SafetyShieldPidCore::new(
+            false, 0.70, 0.80, 3.5, 1.25, 3.2, 0.72, 0.45, 0.01, 0.18, 0.08, 0.005, 0.02,
+        );
+
+        // Rule 1 AEB triggers full brake
+        let aeb_step = shield.compute_control_core(
+            "keep_lane",
+            3,
+            0.99,
+            0.85,
+            0.0,
+            0.0,
+            false,
+            30.0,
+            30.0,
+            true,
+            100.0,
+            35.0,
+            0.0,
+            0.0,
+            "green",
+            "none",
+            false,
+            6.0,
+            0.0,
+            true,
+            true,
+            false,
+            false,
+            0.0,
+            0.05,
+            true,
+        );
+        assert!(aeb_step.gated.shield_triggered);
+        assert_eq!(aeb_step.gated.shield_reason, "rule1_emergency_brake");
+        assert_eq!(aeb_step.throttle_brake, -1.0);
+
+        shield.reset();
+        // Rule 2 low confidence rejects lane change & steps down speed level
+        let low_conf = shield.apply_safety_shield_core(
+            "change_left",
+            3,
+            0.65,
+            0.01,
+            50.0,
+            50.0,
+            true,
+            100.0,
+            40.0,
+            "green",
+            "none",
+            false,
+            6.0,
+            0.0,
+            true,
+            true,
+            false,
+            false,
+            0.0,
+            true,
+        );
+        assert_eq!(low_conf.maneuver, "keep_lane");
+        assert_eq!(low_conf.speed_level, 2);
+        assert_eq!(low_conf.shield_reason, "rule2_low_confidence_fallback");
+
+        // Blind-spot guard blocks lane change even at high confidence
+        let blindspot = shield.apply_safety_shield_core(
+            "change_right",
+            2,
+            0.95,
+            0.01,
+            50.0,
+            50.0,
+            true,
+            100.0,
+            40.0,
+            "green",
+            "none",
+            false,
+            6.0,
+            0.0,
+            true,
+            true,
+            false,
+            true,
+            0.0,
+            true,
+        );
+        assert_eq!(blindspot.maneuver, "keep_lane");
+        assert_eq!(blindspot.shield_reason, "blindspot_right_occupied");
+
+        // CTH-ACC equilibrium at 24 km/h -> d* = 16.0m
+        shield.reset();
+        let acc_eq = shield.apply_safety_shield_core(
+            "follow_lead",
+            2,
+            0.95,
+            0.01,
+            16.0,
+            24.0,
+            true,
+            100.0,
+            24.0,
+            "green",
+            "none",
+            false,
+            6.0,
+            0.0,
+            true,
+            true,
+            false,
+            false,
+            0.0,
+            true,
+        );
+        assert!(!acc_eq.shield_triggered);
+        assert!((acc_eq.target_speed_kmh - 24.0).abs() < 1e-6);
+
+        // Stop-and-go hysteresis latch
+        let stop_enter = shield.apply_safety_shield_core(
+            "follow_lead",
+            2,
+            0.95,
+            0.01,
+            8.2,
+            1.0,
+            true,
+            100.0,
+            2.0,
+            "green",
+            "none",
+            false,
+            6.0,
+            0.0,
+            true,
+            true,
+            false,
+            false,
+            0.0,
+            true,
+        );
+        assert!(shield.stop_hold_active);
+        assert_eq!(stop_enter.target_speed_kmh, 0.0);
+
+        let stop_hold = shield.apply_safety_shield_core(
+            "follow_lead",
+            2,
+            0.95,
+            0.01,
+            8.9,
+            2.8,
+            true,
+            100.0,
+            0.0,
+            "green",
+            "none",
+            false,
+            6.0,
+            0.0,
+            true,
+            true,
+            false,
+            false,
+            0.0,
+            true,
+        );
+        assert!(shield.stop_hold_active);
+        assert_eq!(stop_hold.target_speed_kmh, 0.0);
+
+        let stop_exit = shield.apply_safety_shield_core(
+            "follow_lead",
+            2,
+            0.95,
+            0.01,
+            9.8,
+            4.0,
+            true,
+            100.0,
+            0.0,
+            "green",
+            "none",
+            false,
+            6.0,
+            0.0,
+            true,
+            true,
+            false,
+            false,
+            0.0,
+            true,
+        );
+        assert!(!shield.stop_hold_active);
+        assert!(stop_exit.target_speed_kmh > 4.0);
+    }
+
+    #[test]
+    fn test_ols_aeb_events_geometry_and_expert_labeler() {
+        let w = [25.0, 24.8, 24.5, 24.3, 24.0];
+        assert!((ols_5step_slope_mps_core(&w, 0.05) + 5.0).abs() < 1e-6);
+
+        let ts = [0.05, 0.15, 0.20, 0.35, 0.40];
+        let ds = [29.8, 29.4, 29.2, 28.6, 28.4];
+        assert!((timestamp_ols_slope_mps_core(&ts, &ds) + 4.0).abs() < 1e-6);
+
+        let mut est = LeadSpeedOlsEstimatorCore::new(24.0);
+        for k in 0..5 {
+            est.update(30.0 - 0.2 * (k as f64), -4.0, 24.0, 1, 0.05);
+        }
+        // Sudden cut-in jump (> 6.0m) resets OLS window cleanly
+        let v_cutin = est.update(12.0, -4.0, 24.0, 1, 0.05);
+        assert!(v_cutin.is_finite());
+        assert_eq!(est.window.len(), 1);
+
+        let trace = [0.0, -1.0, 0.0, -0.9, -0.8, 0.0, 0.0, -1.0];
+        assert_eq!(count_sustained_aeb_events_core(&trace, -0.5, 3, 2), (1, 4));
+
+        let orig: Vec<_> = (0..14).map(|k| (k as f64 * 2.0, 0.0, 0.0)).collect();
+        let adj: Vec<_> = (0..20).map(|k| (k as f64 * 2.0, 3.5, 0.0)).collect();
+        let blended = quintic_s_curve_blend_core(&orig, &adj, 14);
+        assert_eq!(blended.len(), 20);
+        assert!((blended[0].1 - 0.0).abs() < 1e-6);
+        assert!((blended[13].1 - 3.5).abs() < 1e-6);
+
+        let pts = compute_polyline_tangents_core(&blended);
+        let pose = sample_continuous_route_pose_core(&pts, 5.2, 0.8, 0, 8.0);
+        assert!(pose.3.is_finite());
+
+        let labeler = RustExpertLabeler::new(0.22, -0.75, 13.5, 30.0, 0.40);
+        let (man, idx, spd, aeb) = labeler.label_step_core(
+            35.0,
+            true,
+            true,
+            "go_straight",
+            25.0,
+            0.05,
+            "",
+            "green",
+            "none",
+            "",
+            0.30,
+            0.2,
+        );
+        assert_eq!((man.as_str(), idx, spd, aeb), ("change_left", 1, 2, 0));
+    }
 }

@@ -3,25 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 import torch
-import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config import load_validated_config
 from src.models.laya_pilot import AutonomousDrivingSystem
 from src.utils.calibration import TemperatureScaler
 from src.utils.dataset import build_dataloaders
+from src.utils.seed import seed_everything
 
 
 def load_config(config_path: str | Path) -> Dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return load_validated_config(config_path).to_dict()
 
 
 def resolve_device(cfg_device: str) -> torch.device:
@@ -46,6 +47,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    seed_everything(int(cfg.get("project", {}).get("seed", 42)))
     use_mock = bool(args.mock or cfg.get("project", {}).get("use_mock", False))
     device = resolve_device(cfg.get("project", {}).get("device", "auto"))
 
@@ -81,8 +83,7 @@ def main() -> None:
 
     system = AutonomousDrivingSystem(config=cfg, use_mock=use_mock).to(device)
     if proj_ckpt_path.exists():
-        ckpt = torch.load(proj_ckpt_path, map_location=device, weights_only=False)
-        system.projector.load_state_dict(ckpt["projector_state_dict"])
+        system.load_adapter_checkpoint(proj_ckpt_path, map_location=device, strict=False)
         print(f"[03_calibrate] Loaded trained SpatialProjector from: {proj_ckpt_path}")
     else:
         print(
@@ -137,14 +138,16 @@ def main() -> None:
         temps.get("b_aeb", 0.0),
     )
 
+    tmp_temp_path = temp_ckpt_path.with_suffix(temp_ckpt_path.suffix + ".tmp")
     torch.save(
         {
             "temperatures": temps,
             "before_metrics": before_metrics,
             "after_metrics": after_metrics,
         },
-        temp_ckpt_path,
+        tmp_temp_path,
     )
+    os.replace(tmp_temp_path, temp_ckpt_path)
 
     print("\n" + "=" * 68)
     print("Stage 2 Temperature Calibration Report")

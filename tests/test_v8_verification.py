@@ -6,7 +6,9 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import unittest
 from pathlib import Path
 from typing import List
 
@@ -363,52 +365,97 @@ def test_compiled_pdf_artifacts_and_manuscript_integrity() -> None:
 def test_mock_pipeline_01_through_04_execution() -> None:
     """Verify all 4 stages of the end-to-end pipeline run cleanly in mock mode with exit code 0."""
     python_exe = sys.executable
-    eval_json = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
-    saved_eval_bytes = eval_json.read_bytes() if eval_json.is_file() else None
 
-    try:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        tmp_data_dir = tmp_path / "data"
+        tmp_proj_ckpt = tmp_path / "projector_best.pt"
+        tmp_temp_ckpt = tmp_path / "temperature.pt"
+        tmp_eval_json = tmp_path / "eval_metrics.json"
+
         # Stage 1: Data collection
         res_01 = subprocess.run(
-            [python_exe, "scripts/01_collect_data.py", "--mock", "--num-frames", "5"],
+            [
+                python_exe,
+                "scripts/01_collect_data.py",
+                "--mock",
+                "--num-frames",
+                "5",
+                "--data-dir",
+                str(tmp_data_dir),
+            ],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
         )
         assert res_01.returncode == 0, f"Stage 1 failed:\n{res_01.stderr}"
-        assert (PROJECT_ROOT / "data" / "metadata.jsonl").is_file()
+        assert (tmp_data_dir / "metadata.jsonl").is_file()
 
         # Stage 2: Projector training
         res_02 = subprocess.run(
-            [python_exe, "scripts/02_train_projector.py", "--mock", "--epochs", "1", "--batch-size", "2"],
+            [
+                python_exe,
+                "scripts/02_train_projector.py",
+                "--mock",
+                "--epochs",
+                "1",
+                "--batch-size",
+                "2",
+                "--data-dir",
+                str(tmp_data_dir),
+                "--output-ckpt",
+                str(tmp_proj_ckpt),
+            ],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
         )
         assert res_02.returncode == 0, f"Stage 2 failed:\n{res_02.stderr}"
-        assert (PROJECT_ROOT / "checkpoints" / "projector_best.pt").is_file()
+        assert tmp_proj_ckpt.is_file()
 
         # Stage 3: Calibration
         res_03 = subprocess.run(
-            [python_exe, "scripts/03_calibrate.py", "--mock"],
+            [
+                python_exe,
+                "scripts/03_calibrate.py",
+                "--mock",
+                "--data-dir",
+                str(tmp_data_dir),
+                "--projector-ckpt",
+                str(tmp_proj_ckpt),
+                "--output-ckpt",
+                str(tmp_temp_ckpt),
+            ],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
         )
         assert res_03.returncode == 0, f"Stage 3 failed:\n{res_03.stderr}"
-        assert (PROJECT_ROOT / "checkpoints" / "temperature.pt").is_file()
+        assert tmp_temp_ckpt.is_file()
 
         # Stage 4: Simulation Evaluation
         res_04 = subprocess.run(
-            [python_exe, "scripts/04_evaluate_sim.py", "--mock", "--episodes", "1", "--perception-mode", "vision_estimated"],
+            [
+                python_exe,
+                "scripts/04_evaluate_sim.py",
+                "--mock",
+                "--episodes",
+                "1",
+                "--perception-mode",
+                "vision_estimated",
+                "--projector-ckpt",
+                str(tmp_proj_ckpt),
+                "--temperature-ckpt",
+                str(tmp_temp_ckpt),
+                "--output-json",
+                str(tmp_eval_json),
+            ],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
         )
         assert res_04.returncode == 0, f"Stage 4 failed:\n{res_04.stderr}"
-        assert eval_json.is_file()
-    finally:
-        if saved_eval_bytes is not None:
-            eval_json.write_bytes(saved_eval_bytes)
+        assert tmp_eval_json.is_file()
 
 
 def test_closed_loop_route_completion_vision_estimated_threshold() -> None:
@@ -433,8 +480,6 @@ def test_closed_loop_route_completion_vision_estimated_threshold() -> None:
 def test_all_12_ablation_modes_execute_cleanly() -> None:
     """Verify all 12 supported ablation modes in 04_evaluate_sim.py execute cleanly with exit code 0."""
     python_exe = sys.executable
-    eval_json = PROJECT_ROOT / "checkpoints" / "eval_metrics.json"
-    saved_eval_bytes = eval_json.read_bytes() if eval_json.is_file() else None
     ablation_modes = [
         "full",
         "mlp_head",
@@ -450,7 +495,8 @@ def test_all_12_ablation_modes_execute_cleanly() -> None:
         "model_only",
     ]
 
-    try:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_eval_json = Path(tmp_dir) / "eval_ablation.json"
         for mode in ablation_modes:
             res = subprocess.run(
                 [
@@ -461,6 +507,8 @@ def test_all_12_ablation_modes_execute_cleanly() -> None:
                     "1",
                     "--ablation-mode",
                     mode,
+                    "--output-json",
+                    str(tmp_eval_json),
                 ],
                 cwd=PROJECT_ROOT,
                 capture_output=True,
@@ -469,9 +517,6 @@ def test_all_12_ablation_modes_execute_cleanly() -> None:
             assert res.returncode == 0, (
                 f"Ablation mode '{mode}' failed with returncode {res.returncode}:\n{res.stderr}"
             )
-    finally:
-        if saved_eval_bytes is not None:
-            eval_json.write_bytes(saved_eval_bytes)
 
 
 def test_rust_core_equivalence_and_speedup() -> None:
@@ -570,6 +615,55 @@ def test_rust_core_equivalence_and_speedup() -> None:
         f"  [Benchmark] PyO3 Rust (Control + Shield + ExpertLabeler): {pyo3_us_per_step:.2f} us/step | "
         f"Pure Rust Core (incl. OLS + Polyline + Shield + PID): {native_rust_us:.3f} us/step"
     )
+
+
+class TestV8VerificationSuite(unittest.TestCase):
+    """Unittest wrapper executing all 15 core verification tests."""
+
+    def test_01_decoupled_pedestrian_and_range_rate_heads(self) -> None:
+        test_decoupled_pedestrian_and_range_rate_heads()
+
+    def test_02_step_normalized_temporal_residual(self) -> None:
+        test_step_normalized_temporal_residual()
+
+    def test_03_5step_ols_variance_reduction_and_target_switch_reset(self) -> None:
+        test_5step_ols_variance_reduction_and_target_switch_reset()
+
+    def test_04_sustained_aeb_event_grouping(self) -> None:
+        test_sustained_aeb_event_grouping()
+
+    def test_05_cth_acc_and_bicycle_curvature_feedforward(self) -> None:
+        test_cth_acc_and_bicycle_curvature_feedforward()
+
+    def test_06_timestamp_aware_ols_under_frame_drops(self) -> None:
+        test_timestamp_aware_ols_under_frame_drops()
+
+    def test_07_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis(self) -> None:
+        test_low_speed_cth_acc_vs_aeb_and_stop_and_go_hysteresis()
+
+    def test_08_aeb_acc_crossover_regime_and_wet_friction_margin(self) -> None:
+        test_aeb_acc_crossover_regime_and_wet_friction_margin()
+
+    def test_09_holm_bonferroni_multiple_comparison_adjustment(self) -> None:
+        test_holm_bonferroni_multiple_comparison_adjustment()
+
+    def test_10_trainable_parameter_count_exact_invariant(self) -> None:
+        test_trainable_parameter_count_exact_invariant()
+
+    def test_11_compiled_pdf_artifacts_and_manuscript_integrity(self) -> None:
+        test_compiled_pdf_artifacts_and_manuscript_integrity()
+
+    def test_12_mock_pipeline_01_through_04_execution(self) -> None:
+        test_mock_pipeline_01_through_04_execution()
+
+    def test_13_closed_loop_route_completion_vision_estimated_threshold(self) -> None:
+        test_closed_loop_route_completion_vision_estimated_threshold()
+
+    def test_14_all_12_ablation_modes_execute_cleanly(self) -> None:
+        test_all_12_ablation_modes_execute_cleanly()
+
+    def test_15_rust_core_equivalence_and_speedup(self) -> None:
+        test_rust_core_equivalence_and_speedup()
 
 
 if __name__ == "__main__":

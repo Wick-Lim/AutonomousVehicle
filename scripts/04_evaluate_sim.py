@@ -14,25 +14,31 @@ from typing import Any, Dict, List, Tuple
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
-import yaml
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.control.rust_backend import RUST_CORE_AVAILABLE, rust_core_module
+from src.config import load_validated_config
+from src.control.rust_backend import get_backend
 from src.control.shield_pid import SafetyShieldPID
 from src.env import create_driving_env
 from src.env.expert_labeler import ExpertLabeler
 from src.models.laya_pilot import AutonomousDrivingSystem
+from src.sim.actuator_and_faults import VALID_FAULT_MODES
+from src.sim.metrics import EpisodeSafetyComfortTracker, aggregate_leaderboard
+from src.sim.scenarios import RealisticSimEnvWrapper
+from src.sim.sensor_fusion import (
+    MultiSensorFusionTracker,
+    estimate_monocular_perception,
+)
 from src.utils.calibration import compute_binary_ece, compute_multiclass_ece
+from src.utils.seed import detect_hardware_env, seed_everything
 
 
 def load_config(config_path: str | Path) -> Dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return load_validated_config(config_path).to_dict()
 
 
 def resolve_device(cfg_device: str) -> torch.device:
@@ -163,6 +169,7 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--projector-ckpt", type=str, default=None)
     parser.add_argument("--temperature-ckpt", type=str, default=None)
+    parser.add_argument("--output-json", type=str, default=None)
     parser.add_argument(
         "--simulator",
         type=str,
@@ -213,8 +220,8 @@ def main() -> None:
         "--perception-mode",
         type=str,
         default="gt",
-        choices=["gt", "vision_estimated"],
-        help="Perception source: 'gt' (simulator state) or 'vision_estimated' (AuxiliaryPerceptionHead outputs).",
+        choices=["gt", "vision_estimated", "vision_radar_fusion"],
+        help="Perception source: 'gt', 'vision_estimated', or 'vision_radar_fusion' (Camera AuxHead + 3D Radar/BSM).",
     )
     parser.add_argument(
         "--shield-mode",
@@ -223,10 +230,28 @@ def main() -> None:
         choices=["on", "off"],
         help="Safety shield gating: 'on' (Rule 1/2 enabled) or 'off' (raw model output only).",
     )
+    parser.add_argument(
+        "--auto-launch-carla",
+        action="store_true",
+        help="Auto-launch local CarlaUE4 server if CARLA port is closed.",
+    )
+    parser.add_argument(
+        "--actuator-realism",
+        action="store_true",
+        help="Enable physical steer/pedal servo lag, rate limits & deadzone.",
+    )
+    parser.add_argument(
+        "--fault-mode",
+        type=str,
+        default="none",
+        choices=list(VALID_FAULT_MODES),
+        help="Optional SOTIF camera/radar fault injection mode.",
+    )
     parser.add_argument("--mock", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    seed_everything(int(cfg.get("project", {}).get("seed", 42)))
     if args.render:
         cfg.setdefault("env", {})["use_render"] = True
     use_mock = bool(args.mock or cfg.get("project", {}).get("use_mock", False))
@@ -254,21 +279,22 @@ def main() -> None:
     )
 
     system = AutonomousDrivingSystem(config=cfg, use_mock=use_mock).to(device)
+    aux_head_calibrated = False
     if proj_ckpt_path.exists():
-        ckpt = torch.load(proj_ckpt_path, map_location=device, weights_only=False)
-        system.projector.load_state_dict(ckpt["projector_state_dict"], strict=False)
+        ckpt = system.load_adapter_checkpoint(proj_ckpt_path, map_location=device, strict=False)
+        aux_head_calibrated = bool(
+            isinstance(ckpt, dict)
+            and any(
+                str(k).startswith("aux_head.")
+                for k in (ckpt.get("projector_state_dict") or {}).keys()
+            )
+        )
         print(f"[04_evaluate_sim] Loaded SpatialProjector from: {proj_ckpt_path}")
 
     calibrated_ece_from_ckpt = None
     if temp_ckpt_path.exists():
-        t_ckpt = torch.load(temp_ckpt_path, map_location=device, weights_only=False)
+        t_ckpt = system.load_temperature_checkpoint(temp_ckpt_path, map_location=device)
         temps = t_ckpt["temperatures"]
-        system.laya.set_temperatures(
-            temps["t_maneuver"],
-            temps["t_speed"],
-            temps["t_aeb"],
-            temps.get("b_aeb", 0.0),
-        )
         calibrated_ece_from_ckpt = t_ckpt.get("after_metrics", {}).get("mean_ece", None)
         print(
             f"[04_evaluate_sim] Loaded calibrated temperatures: "
@@ -286,15 +312,26 @@ def main() -> None:
             for p in system.laya.backbone.parameters():
                 noise = torch.randn(p.shape, generator=gen, dtype=p.dtype).to(p.device) * 0.02
                 p.copy_(noise)
+    if args.auto_launch_carla:
+        cfg.setdefault("env", {}).setdefault("carla", {})["auto_launch_server"] = True
+
     controller = SafetyShieldPID(config=cfg, use_mock=use_mock)
     labeler = ExpertLabeler()
-    env = create_driving_env(
+    env: Any = create_driving_env(
         config=cfg,
         use_mock=use_mock,
         start_seed=eval_start_seed,
         num_scenarios=num_episodes,
         simulator=simulator_name,
     )
+    if args.actuator_realism or args.fault_mode != "none":
+        env = RealisticSimEnvWrapper(
+            base_env=env,
+            scenario="nominal_urban_cruise",
+            actuator_realism=bool(args.actuator_realism),
+            fault_mode=args.fault_mode,
+        )
+    sim_dt = float(getattr(env, "step_dt", 0.05))
 
     # Warm-up pass for accurate latency measurement
     dummy_rgb = np.zeros(
@@ -320,7 +357,11 @@ def main() -> None:
     episode_crashed: List[bool] = []
     episode_scenarios: List[str] = []
     weather_presets_tested: List[str] = []
+    episode_safety_summaries: List[Dict[str, Any]] = []
     aux_lead_errors_m: List[float] = []
+    fusion_tracker = MultiSensorFusionTracker()
+    mono_lead_estimator = get_backend().RustLeadSpeedEstimator(35.0)
+    safety_tracker = EpisodeSafetyComfortTracker(dt=sim_dt)
     cross_track_errors_m: List[float] = []
     steer_deltas: List[float] = []
     speed_errors_kmh: List[float] = []
@@ -348,10 +389,16 @@ def main() -> None:
     for ep in tqdm(
         range(num_episodes), desc="Evaluating Closed-Loop Unseen Maps", unit="ep"
     ):
+        ep_rng = np.random.default_rng(eval_start_seed + ep)
         rgb, telemetry, info = env.reset(seed=eval_start_seed + ep)
         system.reset_temporal_buffer()
         controller.reset()
+        fusion_tracker.reset(35.0)
+        mono_lead_estimator.reset(35.0)
+        safety_tracker.reset()
         done = False
+        ep_step_idx: int = 0
+        prev_mono_rgb = None
         ar_decision_queue: List[Dict[str, Any]] = []
         lead_d_window: List[tuple[float, float]] = []
         obs_time_s: float = 0.0
@@ -370,14 +417,16 @@ def main() -> None:
         }
 
         while not done:
+            ep_step_idx += 1
             # Ground-truth reference label for online ECE monitoring
             expert_act = env.get_expert_action(info)
             gt_label = labeler.label_step(telemetry, expert_act, info)
 
-            # In vision_estimated mode, strip simulator actor queries before building the Laya state prompt
+            # In vision_estimated or vision_radar_fusion mode, strip simulator actor queries before building the Laya state prompt
             prompt_telemetry = dict(telemetry)
-            if args.perception_mode == "vision_estimated":
+            if args.perception_mode in ("vision_estimated", "vision_radar_fusion"):
                 prompt_telemetry.update(prev_vision_tel)
+                prompt_telemetry["lane_offset_m"] = telemetry.get("lane_offset_m", 0.0)
 
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -423,86 +472,180 @@ def main() -> None:
 
             ctrl_telemetry = dict(telemetry)
             if args.perception_mode == "vision_estimated" and aux_p:
-                # Replace all simulator actor queries with AuxiliaryPerceptionHead + 5-sample (0.20s span at 20Hz) timestamp-aware OLS range-rate fusion
+                # Replace all simulator actor queries with AuxiliaryPerceptionHead + 5-sample timestamp-aware OLS range-rate fusion
                 gt_d = float(telemetry.get("lead_distance_m", 60.0))
                 if use_mock:
-                    # In mock mode, simulate realistic visual monocular depth estimation (\sigma = 0.5m)
-                    pred_d = float(np.clip(gt_d + np.random.normal(0.0, 0.5), 0.0, 60.0))
+                    pred_d = float(np.clip(gt_d + ep_rng.normal(0.0, 0.5), 0.0, 60.0))
+                    pred_ped_d = float(
+                        aux_p["pred_ped_distance_m"][0].item()
+                        if "pred_ped_distance_m" in aux_p
+                        else (aux_p["pedestrian_distance_m"][0].item() if "pedestrian_distance_m" in aux_p else 100.0)
+                    )
+                    if str(telemetry.get("hazard_source", "none")).lower() == "pedestrian":
+                        gt_ped_d = float(telemetry.get("pedestrian_distance_m", 100.0))
+                        pred_ped_d = float(np.clip(gt_ped_d + ep_rng.normal(0.0, 0.5), 0.0, 100.0))
+                    gt_off = float(telemetry.get("lane_offset_m", 0.0))
+                    pred_off = float(gt_off + ep_rng.normal(0.0, 0.02))
+                    ego_v_kmh = float(telemetry.get("speed_kmh", 0.0))
+                    gt_v_lead = float(telemetry.get("lead_speed_kmh", 40.0))
+                    gt_rr = (gt_v_lead - ego_v_kmh) / 3.6
+                    pred_rr_mps = float(np.clip(gt_rr + ep_rng.normal(0.0, 0.2), -25.0, 25.0))
+                    elapsed_steps = max(1, int(telemetry.get("elapsed_steps", 1)))
+                    obs_time_s += elapsed_steps * sim_dt
+
+                    if lead_d_window and abs(pred_d - lead_d_window[-1][1]) > 6.0:
+                        lead_d_window = [(obs_time_s, pred_d)]
+                    else:
+                        lead_d_window.append((obs_time_s, pred_d))
+                        if len(lead_d_window) > 5:
+                            lead_d_window.pop(0)
+
+                    if len(lead_d_window) < 2:
+                        dd_dt_reg = pred_rr_mps
+                    else:
+                        dd_dt_reg = float(
+                            get_backend().timestamp_ols_slope_mps(
+                                [pt[0] for pt in lead_d_window],
+                                [pt[1] for pt in lead_d_window],
+                            )
+                        )
+
+                    dd_dt_fused = 0.70 * dd_dt_reg + 0.30 * pred_rr_mps
+                    raw_v_lead = ego_v_kmh + 3.6 * dd_dt_fused
+                    est_v_lead = float(
+                        np.clip(0.65 * prev_est_v_lead + 0.35 * raw_v_lead, 0.0, 60.0)
+                    )
+                    prev_est_v_lead = est_v_lead
+
+                    tl_idx = int(aux_p["pred_traffic_light_idx"][0].item())
+                    hz_idx = int(aux_p["pred_hazard_idx"][0].item())
+                    tl_str = ("green", "yellow", "red")[min(2, max(0, tl_idx))]
+                    hz_str = ("none", "vehicle", "pedestrian", "red_light")[min(3, max(0, hz_idx))]
+                    bs_p = aux_p["pred_blindspot_probs"][0]
+                    bs_left_latch = 30 if float(bs_p[0].item()) >= 0.5 else max(0, bs_left_latch - 1)
+                    bs_right_latch = 30 if float(bs_p[1].item()) >= 0.5 else max(0, bs_right_latch - 1)
+
+                    prev_vision_tel = {
+                        "lead_distance_m": pred_d,
+                        "lead_speed_kmh": est_v_lead,
+                        "pedestrian_distance_m": pred_ped_d if hz_str == "pedestrian" else 100.0,
+                        "lane_offset_m": pred_off,
+                        "traffic_light": tl_str,
+                        "hazard_source": hz_str,
+                        "blind_spot_left": bool(bs_left_latch > 0),
+                        "blind_spot_right": bool(bs_right_latch > 0),
+                    }
+                    ctrl_telemetry.update(prev_vision_tel)
                 else:
                     pred_d = float(aux_p["pred_lead_distance_m"][0].item())
-
-                pred_ped_d = float(
-                    aux_p["pred_ped_distance_m"][0].item()
-                    if "pred_ped_distance_m" in aux_p
-                    else (aux_p["pedestrian_distance_m"][0].item() if "pedestrian_distance_m" in aux_p else 100.0)
-                )
-                if use_mock and str(telemetry.get("hazard_source", "none")).lower() == "pedestrian":
-                    gt_ped_d = float(telemetry.get("pedestrian_distance_m", 100.0))
-                    pred_ped_d = float(np.clip(gt_ped_d + np.random.normal(0.0, 0.5), 0.0, 100.0))
-
-                gt_off = float(telemetry.get("lane_offset_m", 0.0))
-                if use_mock:
-                    pred_off = float(gt_off + np.random.normal(0.0, 0.02))
-                else:
+                    pred_ped_d = float(
+                        aux_p["pred_ped_distance_m"][0].item()
+                        if "pred_ped_distance_m" in aux_p
+                        else 100.0
+                    )
                     pred_off = float(aux_p["pred_lane_offset_m"][0].item())
-
-                ego_v_kmh = float(telemetry.get("speed_kmh", 0.0))
-                gt_v_lead = float(telemetry.get("lead_speed_kmh", 40.0))
-                gt_rr = (gt_v_lead - ego_v_kmh) / 3.6
-                if use_mock:
-                    pred_rr_mps = float(np.clip(gt_rr + np.random.normal(0.0, 0.2), -25.0, 25.0))
-                else:
                     pred_rr_mps = (
                         float(aux_p["pred_range_rate_mps"][0].item())
                         if "pred_range_rate_mps" in aux_p
                         else 0.0
                     )
-                elapsed_steps = max(1, int(telemetry.get("elapsed_steps", 1)))
-                obs_time_s += elapsed_steps * 0.05
-
-                # Reset window on discrete target switches (cut-in / lead departure > 6.0 m)
-                if lead_d_window and abs(pred_d - lead_d_window[-1][1]) > 6.0:
-                    lead_d_window = [(obs_time_s, pred_d)]
-                else:
-                    lead_d_window.append((obs_time_s, pred_d))
-                    if len(lead_d_window) > 5:
-                        lead_d_window.pop(0)
-
-                if len(lead_d_window) < 2:
-                    dd_dt_reg = pred_rr_mps
-                else:
-                    assert rust_core_module is not None
-                    dd_dt_reg = float(
-                        rust_core_module.timestamp_ols_slope_mps(
-                            [pt[0] for pt in lead_d_window],
-                            [pt[1] for pt in lead_d_window],
-                        )
+                    tl_idx = int(aux_p["pred_traffic_light_idx"][0].item())
+                    hz_idx = int(aux_p["pred_hazard_idx"][0].item())
+                    tl_str = ("green", "yellow", "red")[min(2, max(0, tl_idx))]
+                    hz_str = ("none", "vehicle", "pedestrian", "red_light")[min(3, max(0, hz_idx))]
+                    bs_p = aux_p["pred_blindspot_probs"][0]
+                    elapsed_steps = max(1, int(telemetry.get("elapsed_steps", 1)))
+                    mono = estimate_monocular_perception(
+                        aux_vision={
+                            "pred_lead_distance_m": pred_d,
+                            "pred_ped_distance_m": pred_ped_d,
+                            "pred_range_rate_mps": pred_rr_mps,
+                            "pred_lane_offset_m": pred_off,
+                            "pred_traffic_light": tl_str,
+                            "pred_hazard_source": hz_str,
+                            "pred_blindspot_left": float(bs_p[0].item()),
+                            "pred_blindspot_right": float(bs_p[1].item()),
+                        },
+                        base_telemetry=telemetry,
+                        lead_speed_estimator=mono_lead_estimator,
+                        radar_targets=info.get("radar_targets"),
+                        rgb=rgb,
+                        prev_rgb=prev_mono_rgb,
+                        prev_lead_d=float(prev_vision_tel.get("lead_distance_m", 60.0)),
+                        bs_left_latch=bs_left_latch,
+                        bs_right_latch=bs_right_latch,
+                        step_idx=ep_step_idx,
+                        dt=sim_dt,
+                        elapsed_steps=elapsed_steps,
+                        aux_calibrated=aux_head_calibrated,
                     )
-
-                dd_dt_fused = 0.70 * dd_dt_reg + 0.30 * pred_rr_mps
-                raw_v_lead = ego_v_kmh + 3.6 * dd_dt_fused
-                est_v_lead = float(
-                    np.clip(0.65 * prev_est_v_lead + 0.35 * raw_v_lead, 0.0, 60.0)
+                    prev_mono_rgb = rgb.copy()
+                    bs_left_latch = int(mono["bs_left_latch"])
+                    bs_right_latch = int(mono["bs_right_latch"])
+                    prev_vision_tel = {
+                        "lead_distance_m": mono["lead_distance_m"],
+                        "lead_speed_kmh": mono["lead_speed_kmh"],
+                        "pedestrian_distance_m": mono["pedestrian_distance_m"],
+                        "lane_offset_m": mono["lane_offset_m"],
+                        "traffic_light": mono["traffic_light"],
+                        "hazard_source": mono["hazard_source"],
+                        "blind_spot_left": mono["blind_spot_left"],
+                        "blind_spot_right": mono["blind_spot_right"],
+                    }
+                    ctrl_telemetry.update(prev_vision_tel)
+            elif args.perception_mode == "vision_radar_fusion" and aux_p:
+                gt_d = float(telemetry.get("lead_distance_m", 60.0))
+                pred_d = (
+                    float(np.clip(gt_d + ep_rng.normal(0.0, 0.5), 0.0, 60.0))
+                    if use_mock
+                    else float(aux_p["pred_lead_distance_m"][0].item())
                 )
-                prev_est_v_lead = est_v_lead
-
+                pred_ped_d = float(
+                    aux_p["pred_ped_distance_m"][0].item()
+                    if "pred_ped_distance_m" in aux_p
+                    else 100.0
+                )
+                pred_off = float(aux_p["pred_lane_offset_m"][0].item())
+                pred_rr_mps = (
+                    float(aux_p["pred_range_rate_mps"][0].item())
+                    if "pred_range_rate_mps" in aux_p
+                    else 0.0
+                )
                 tl_idx = int(aux_p["pred_traffic_light_idx"][0].item())
                 hz_idx = int(aux_p["pred_hazard_idx"][0].item())
                 tl_str = ("green", "yellow", "red")[min(2, max(0, tl_idx))]
                 hz_str = ("none", "vehicle", "pedestrian", "red_light")[min(3, max(0, hz_idx))]
                 bs_p = aux_p["pred_blindspot_probs"][0]
-                bs_left_latch = 30 if float(bs_p[0].item()) >= 0.5 else max(0, bs_left_latch - 1)
-                bs_right_latch = 30 if float(bs_p[1].item()) >= 0.5 else max(0, bs_right_latch - 1)
-
+                elapsed_steps = max(1, int(telemetry.get("elapsed_steps", 1)))
+                fused = fusion_tracker.fuse(
+                    aux_vision={
+                        "pred_lead_distance_m": pred_d,
+                        "pred_ped_distance_m": pred_ped_d,
+                        "pred_range_rate_mps": pred_rr_mps,
+                        "pred_lane_offset_m": pred_off,
+                        "pred_traffic_light": tl_str,
+                        "pred_hazard_source": hz_str,
+                        "pred_blindspot_left": float(bs_p[0].item()),
+                        "pred_blindspot_right": float(bs_p[1].item()),
+                    },
+                    base_telemetry=telemetry,
+                    radar_targets=info.get("radar_targets", []),
+                    imu_telemetry=info.get("imu_telemetry"),
+                    rgb=rgb,
+                    dt=sim_dt,
+                    elapsed_steps=elapsed_steps,
+                    aux_calibrated=aux_head_calibrated,
+                )
                 prev_vision_tel = {
-                    "lead_distance_m": pred_d,
-                    "lead_speed_kmh": est_v_lead,
-                    "pedestrian_distance_m": pred_ped_d if hz_str == "pedestrian" else 100.0,
-                    "lane_offset_m": pred_off,
-                    "traffic_light": tl_str,
-                    "hazard_source": hz_str,
-                    "blind_spot_left": bool(bs_left_latch > 0),
-                    "blind_spot_right": bool(bs_right_latch > 0),
+                    "lead_distance_m": fused["lead_distance_m"],
+                    "lead_speed_kmh": fused["lead_speed_kmh"],
+                    "pedestrian_distance_m": fused["pedestrian_distance_m"],
+                    "lane_offset_m": fused["lane_offset_m"],
+                    "traffic_light": fused["traffic_light"],
+                    "hazard_source": fused["hazard_source"],
+                    "blind_spot_left": fused["blind_spot_left"],
+                    "blind_spot_right": fused["blind_spot_right"],
+                    "uncertainty_margin_m": fused["uncertainty_margin_m"],
                 }
                 ctrl_telemetry.update(prev_vision_tel)
 
@@ -600,7 +743,7 @@ def main() -> None:
 
             # Apply Calibrated Safety Shield + Curvature Feedforward/PID controller
             control_action, gated_info = controller.compute_control(
-                decision, ctrl_telemetry, shield_enabled=shield_enabled
+                decision, ctrl_telemetry, dt=sim_dt, shield_enabled=shield_enabled
             )
             if gated_info["shield_triggered"]:
                 shield_reasons[gated_info["shield_reason"]] += 1
@@ -636,8 +779,22 @@ def main() -> None:
 
             setattr(env, "_last_gated_maneuver", str(gated_info.get("maneuver", "keep_lane")))
             rgb, telemetry, _, done_step, info = env.step(control_action)
+            safety_tracker.step(
+                telemetry=telemetry,
+                control_action=control_action,
+                gated_info=gated_info,
+                extra_info=info,
+                dt=sim_dt,
+            )
             done = bool(done or done_step)
 
+        episode_safety_summaries.append(
+            safety_tracker.summarize(
+                route_completion=float(info.get("route_completion", 0.0)),
+                arrived=bool(info.get("arrive_dest", False)),
+                crashed=bool(info.get("crash", False)),
+            )
+        )
         episode_completions.append(float(info.get("route_completion", 0.0)))
         episode_driving_scores.append(
             float(info.get("driving_score", float(info.get("route_completion", 0.0)) * 100.0))
@@ -689,13 +846,7 @@ def main() -> None:
         "ablation_mode": args.ablation_mode,
         "perception_mode": args.perception_mode,
         "shield_mode": args.shield_mode,
-        "hardware_env": {
-            "cpu": "AMD Ryzen 5 7500F 6-Core Processor (12 Threads)",
-            "gpu": "NVIDIA GeForce RTX 4070 Ti (12 GB GDDR6X)",
-            "os": "Windows 11 (10.0.26200)",
-            "pytorch": torch.__version__,
-            "precision": "FP32 (batch_size=1, warmup_passes=3)",
-        },
+        "hardware_env": detect_hardware_env(),
         "episodes": num_episodes,
         "seed_range": [eval_start_seed, eval_start_seed + num_episodes - 1],
         "total_frames": len(latencies_ms),
@@ -740,6 +891,7 @@ def main() -> None:
         "fsd_scenarios_tested": episode_scenarios,
         "weather_presets_tested": weather_presets_tested,
         "fsd_metrics": latest_fsd_metrics,
+        "safety_comfort_summary": aggregate_leaderboard(episode_safety_summaries),
         "shield_interventions": dict(shield_reasons),
         "targets_met": {
             "latency_le_40ms": mean_latency_ms <= 40.0,
@@ -752,10 +904,16 @@ def main() -> None:
     eval_filename = (
         "eval_metrics_carla.json" if simulator_name == "carla" else "eval_metrics.json"
     )
-    eval_out_path = PROJECT_ROOT / "checkpoints" / eval_filename
+    eval_out_path = (
+        Path(args.output_json)
+        if args.output_json is not None
+        else PROJECT_ROOT / "checkpoints" / eval_filename
+    )
     eval_out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(eval_out_path, "w", encoding="utf-8") as f:
+    tmp_eval_path = eval_out_path.with_suffix(eval_out_path.suffix + ".tmp")
+    with open(tmp_eval_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+    os.replace(tmp_eval_path, eval_out_path)
 
     print("\n" + "=" * 74)
     print(

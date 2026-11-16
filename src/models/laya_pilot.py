@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -783,15 +785,90 @@ class AutonomousDrivingSystem(nn.Module):
         """Reset temporal token ring buffer in SpatialProjector at episode start."""
         self.projector.reset_temporal_buffer()
 
+    def save_adapter_checkpoint(
+        self,
+        path: str | Path,
+        epoch: int = 0,
+        val_metrics: Optional[Dict[str, Any]] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Atomically save all trainable adapter and readout/trajectory head weights."""
+        ckpt_path = Path(path)
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
+        payload = {
+            "schema_version": "1.1",
+            "epoch": int(epoch),
+            "projector_state_dict": self.projector.state_dict(),
+            "trajectory_head_state_dict": self.laya.trajectory_head.state_dict(),
+            "maneuver_head_state_dict": self.laya.maneuver_head.state_dict(),
+            "speed_head_state_dict": self.laya.speed_head.state_dict(),
+            "aeb_head_state_dict": self.laya.aeb_head.state_dict(),
+            "val_metrics": val_metrics or {},
+            "config": config or {},
+        }
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, ckpt_path)
+
+    def load_adapter_checkpoint(
+        self,
+        path: str | Path,
+        map_location: Any = "cpu",
+        strict: bool = False,
+    ) -> Dict[str, Any]:
+        """Load projector and optional head state dicts from checkpoint (backward-compatible)."""
+        ckpt_path = Path(path)
+        ckpt = torch.load(ckpt_path, map_location=map_location, weights_only=False)
+        if "projector_state_dict" in ckpt:
+            self.projector.load_state_dict(ckpt["projector_state_dict"], strict=strict)
+        head_map = {
+            "trajectory_head_state_dict": self.laya.trajectory_head,
+            "maneuver_head_state_dict": self.laya.maneuver_head,
+            "speed_head_state_dict": self.laya.speed_head,
+            "aeb_head_state_dict": self.laya.aeb_head,
+        }
+        for key, mod in head_map.items():
+            if key in ckpt and ckpt[key] is not None:
+                mod.load_state_dict(ckpt[key], strict=strict)
+        return ckpt
+
+    def load_temperature_checkpoint(
+        self,
+        path: str | Path,
+        map_location: Any = "cpu",
+    ) -> Dict[str, Any]:
+        """Load post-hoc temperature scaling parameters and apply them to `LayaPilot`."""
+        ckpt_path = Path(path)
+        t_ckpt = torch.load(ckpt_path, map_location=map_location, weights_only=False)
+        temps = t_ckpt["temperatures"]
+        self.laya.set_temperatures(
+            temps["t_maneuver"],
+            temps["t_speed"],
+            temps["t_aeb"],
+            temps.get("b_aeb", 0.0),
+        )
+        return t_ckpt
+
     def forward(
         self,
         images: torch.Tensor,
         telemetries: Sequence[Dict[str, Any]],
+        elapsed_steps: Optional[int] = None,
+        prev_visual_tokens: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """Single forward pass from (B, 3, 196, 392) images + telemetry dicts to decisions & trajectory."""
         with torch.no_grad():
             patch_tokens = self.dino(images)  # (B, 392, 768)
-        visual_tokens = self.projector(patch_tokens)  # (B, 36, 1024)
+        eff_elapsed = (
+            int(elapsed_steps)
+            if elapsed_steps is not None
+            else (max(1, int(telemetries[0].get("elapsed_steps", 1))) if len(telemetries) == 1 else 1)
+        )
+        visual_tokens = self.projector(
+            patch_tokens,
+            elapsed_steps=eff_elapsed,
+            prev_visual_tokens=prev_visual_tokens,
+        )  # (B, 36, 1024)
         aux_perception = self.projector.predict_aux_perception(
             visual_tokens, telemetries=telemetries
         )

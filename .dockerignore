@@ -1,0 +1,13 @@
+.git/
+.github/
+__pycache__/
+*.py[cod]
+rust_core/target/
+data/*
+!data/.gitkeep
+paper/
+assets/*.mp4
+*.log
+logs/
+.vscode/
+.idea/

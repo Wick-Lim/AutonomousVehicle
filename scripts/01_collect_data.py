@@ -10,20 +10,20 @@ from pathlib import Path
 from typing import Any, Dict
 
 import cv2
-import yaml
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config import load_validated_config
 from src.env import create_driving_env
 from src.env.expert_labeler import ExpertLabeler
+from src.utils.seed import seed_everything
 
 
 def load_config(config_path: str | Path) -> Dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return load_validated_config(config_path).to_dict()
 
 
 def main() -> None:
@@ -63,6 +63,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    seed_everything(int(cfg.get("project", {}).get("seed", 42)))
     use_mock = bool(args.mock or cfg.get("project", {}).get("use_mock", False))
     simulator_name = (args.simulator or cfg.get("env", {}).get("simulator", "metadrive")).lower()
     num_frames = int(

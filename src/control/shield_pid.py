@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-from src.control.rust_backend import rust_core_module
+from src.control.rust_backend import get_backend
 
 
 @dataclass
@@ -19,13 +19,10 @@ class PIDGains:
 class ScalarPID:
     """Discrete-time PID controller with anti-windup clamping backed by `RustScalarPID`."""
 
-    def __init__(self, gains: PIDGains) -> None:
-        if rust_core_module is None:
-            raise RuntimeError(
-                "Rust extension `autonomous_vehicle_rust` is required. Build `rust_core` with `cargo build --release`."
-            )
+    def __init__(self, gains: PIDGains, require_rust: bool = False) -> None:
+        backend = get_backend(require_rust=require_rust)
         self.gains = gains
-        self._rust_pid = rust_core_module.RustScalarPID(
+        self._rust_pid = backend.RustScalarPID(
             float(gains.kp),
             float(gains.ki),
             float(gains.kd),
@@ -70,11 +67,9 @@ class SafetyShieldPID:
         self,
         config: Optional[Dict[str, Any]] = None,
         use_mock: bool = False,
+        require_rust: bool = False,
     ) -> None:
-        if rust_core_module is None:
-            raise RuntimeError(
-                "Rust extension `autonomous_vehicle_rust` is required. Build `rust_core` with `cargo build --release`."
-            )
+        backend = get_backend(require_rust=require_rust)
         cfg = config or {}
         ctrl_cfg = cfg.get("control", {})
         shield_cfg = ctrl_cfg.get("safety_shield", {})
@@ -106,10 +101,14 @@ class SafetyShieldPID:
         lon_ki = float(lon_cfg.get("ki", 0.005))
         lon_kd = float(lon_cfg.get("kd", 0.02))
 
-        self.lateral_pid = ScalarPID(PIDGains(kp=lat_kp, ki=lat_ki, kd=lat_kd))
-        self.longitudinal_pid = ScalarPID(PIDGains(kp=lon_kp, ki=lon_ki, kd=lon_kd))
+        self.lateral_pid = ScalarPID(
+            PIDGains(kp=lat_kp, ki=lat_ki, kd=lat_kd), require_rust=require_rust
+        )
+        self.longitudinal_pid = ScalarPID(
+            PIDGains(kp=lon_kp, ki=lon_ki, kd=lon_kd), require_rust=require_rust
+        )
 
-        self._rust_shield = rust_core_module.RustSafetyShieldPID(
+        self._rust_shield = backend.RustSafetyShieldPID(
             self.use_mock,
             self.aeb_threshold,
             self.confidence_threshold,
@@ -164,9 +163,9 @@ class SafetyShieldPID:
         uncertainty_margin_m: float = 0.0,
     ) -> float:
         """Velocity-, friction-, and closing-rate-dependent AEB boundary d_AEB(v_ego, v_lead) via Rust core."""
-        assert rust_core_module is not None
+        backend = get_backend()
         return float(
-            rust_core_module.compute_kinematic_aeb_distance(
+            backend.compute_kinematic_aeb_distance(
                 float(current_speed_kmh),
                 float(lead_speed_kmh),
                 float(a_max_mps2),
@@ -193,13 +192,13 @@ class SafetyShieldPID:
         telemetry: Dict[str, Any],
     ) -> float:
         """Compute Kinematic Bicycle MPC feedforward steering command (wheelbase L = 2.85m) via Rust core."""
-        assert rust_core_module is not None
+        backend = get_backend()
         road_curv = float(telemetry.get("road_curvature", 0.0))
         lane_offset_m = float(telemetry.get("lane_offset_m", 0.0))
         pred_traj = decision.get("predicted_trajectory")
         if isinstance(pred_traj, list) and len(pred_traj) >= 3:
             return float(
-                rust_core_module.compute_mpc_feedforward(
+                backend.compute_mpc_feedforward(
                     road_curv,
                     lane_offset_m,
                     float(pred_traj[2][0]),
@@ -208,7 +207,7 @@ class SafetyShieldPID:
                 )
             )
         return float(
-            rust_core_module.compute_mpc_feedforward(
+            backend.compute_mpc_feedforward(
                 road_curv, lane_offset_m, 0.0, 0.0, False
             )
         )

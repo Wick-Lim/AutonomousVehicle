@@ -97,13 +97,16 @@ class DrivingDataset(Dataset):
         )
 
         weights: List[float] = []
+        keep_ref = max(1e-6, base_weights.get(0, 1.0))
+        aeb_mult = max(1.0, aeb_bonus ** 0.25)
         for rec in self.records:
             lbl = rec["labels"]
             m_idx = int(lbl.get("maneuver_idx", 0))
             aeb = int(lbl.get("emergency_brake", 0))
-            w = float(inv_freq[m_idx]) * (1.25 if m_idx in (1, 2) else 1.0)
+            prior_mult = max(0.25, base_weights.get(m_idx, 1.0) / keep_ref) ** 0.25
+            w = float(inv_freq[m_idx]) * prior_mult
             if aeb == 1:
-                w *= 1.5
+                w *= aeb_mult
             weights.append(max(1e-4, w))
 
         return torch.DoubleTensor(weights)

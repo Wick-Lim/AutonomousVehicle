@@ -10,20 +10,20 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import yaml
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config import load_validated_config
 from src.models.laya_pilot import AutonomousDrivingSystem
 from src.utils.dataset import build_dataloaders
+from src.utils.seed import seed_everything
 
 
 def load_config(config_path: str | Path) -> Dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return load_validated_config(config_path).to_dict()
 
 
 def resolve_device(cfg_device: str) -> torch.device:
@@ -148,6 +148,7 @@ def evaluate(
     w_a = float(loss_weights.get("emergency_brake", 2.0))
     w_traj = float(loss_weights.get("trajectory", 0.5))
     w_aux = float(loss_weights.get("aux_perception", 0.2))
+    w_readout = float(loss_weights.get("readout_aux", 0.1))
 
     with torch.no_grad():
         for batch in val_loader:
@@ -164,6 +165,13 @@ def evaluate(
             loss_a = F.binary_cross_entropy_with_logits(
                 out["aeb_logits"].squeeze(-1), target_a
             )
+            loss_readout = (
+                F.cross_entropy(out["mlp_maneuver_logits"], target_m)
+                + F.cross_entropy(out["mlp_speed_logits"], target_s)
+                + F.binary_cross_entropy_with_logits(
+                    out["mlp_aeb_logits"].squeeze(-1), target_a
+                )
+            )
             loss_traj, loss_aux = compute_aux_and_traj_losses(
                 out, telemetries, target_traj, device
             )
@@ -173,6 +181,7 @@ def evaluate(
                 + w_a * loss_a
                 + w_traj * loss_traj
                 + w_aux * loss_aux
+                + w_readout * loss_readout
             )
 
             bsz = images.size(0)
@@ -204,6 +213,7 @@ def main() -> None:
         default=str(PROJECT_ROOT / "configs" / "default.yaml"),
     )
     parser.add_argument("--data-dir", type=str, default=None)
+    parser.add_argument("--output-ckpt", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
@@ -215,6 +225,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    seed_everything(int(cfg.get("project", {}).get("seed", 42)))
     use_mock = bool(args.mock or cfg.get("project", {}).get("use_mock", False))
     device = resolve_device(cfg.get("project", {}).get("device", "auto"))
 
@@ -237,8 +248,11 @@ def main() -> None:
         if args.data_dir is not None
         else PROJECT_ROOT / data_cfg.get("data_dir", "data")
     )
-    ckpt_path = PROJECT_ROOT / train_cfg.get(
-        "projector_ckpt", "checkpoints/projector_best.pt"
+    ckpt_path = Path(
+        args.output_ckpt
+        if args.output_ckpt is not None
+        else PROJECT_ROOT
+        / train_cfg.get("projector_ckpt", "checkpoints/projector_best.pt")
     )
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -299,11 +313,15 @@ def main() -> None:
     w_a = float(loss_weights.get("emergency_brake", 2.0))
     w_traj = float(loss_weights.get("trajectory", 0.5))
     w_aux = float(loss_weights.get("aux_perception", 0.2))
+    w_readout = float(loss_weights.get("readout_aux", 0.1))
 
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
         system.projector.train()
+        system.laya.maneuver_head.train()
+        system.laya.speed_head.train()
+        system.laya.aeb_head.train()
         system.laya.trajectory_head.train()
         running_loss = 0.0
         n_seen = 0
@@ -326,6 +344,13 @@ def main() -> None:
             loss_a = F.binary_cross_entropy_with_logits(
                 out["aeb_logits"].squeeze(-1), target_a
             )
+            loss_readout = (
+                F.cross_entropy(out["mlp_maneuver_logits"], target_m)
+                + F.cross_entropy(out["mlp_speed_logits"], target_s)
+                + F.binary_cross_entropy_with_logits(
+                    out["mlp_aeb_logits"].squeeze(-1), target_a
+                )
+            )
             loss_traj, loss_aux = compute_aux_and_traj_losses(
                 out, telemetries, target_traj, device
             )
@@ -335,6 +360,7 @@ def main() -> None:
                 + w_a * loss_a
                 + w_traj * loss_traj
                 + w_aux * loss_aux
+                + w_readout * loss_readout
             )
 
             loss.backward()
@@ -360,15 +386,11 @@ def main() -> None:
 
         if val_metrics["val_loss"] <= best_val_loss:
             best_val_loss = val_metrics["val_loss"]
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "projector_state_dict": system.projector.state_dict(),
-                    "trajectory_head_state_dict": system.laya.trajectory_head.state_dict(),
-                    "val_metrics": val_metrics,
-                    "config": cfg,
-                },
+            system.save_adapter_checkpoint(
                 ckpt_path,
+                epoch=epoch,
+                val_metrics=val_metrics,
+                config=cfg,
             )
 
     print(f"\n[02_train_projector] Saved best SpatialProjector checkpoint to: {ckpt_path}")

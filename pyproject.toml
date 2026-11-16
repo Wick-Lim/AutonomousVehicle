@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autonomous-vehicle"
+version = "1.0.0"
+description = "Sub-40ms Non-Autoregressive Closed-Loop Autonomous Driving powered by Frozen DINOv2, Laya & Rust Control Core"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Wick-Lim", email = "wicklim90@gmail.com" }]
+dependencies = [
+  "torch>=2.1.0",
+  "torchvision>=0.16.0",
+  "transformers>=4.48.0",
+  "accelerate>=0.30.0",
+  "safetensors>=0.4.0",
+  "numpy>=1.24.0",
+  "opencv-python-headless>=4.8.0",
+  "Pillow>=10.0.0",
+  "PyYAML>=6.0.0",
+  "tqdm>=4.66.0",
+  "einops>=0.7.0",
+  "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.110.0",
+  "uvicorn>=0.27.0",
+  "prometheus-client>=0.20.0",
+  "python-multipart>=0.0.9",
+  "httpx>=0.26.0",
+]
+sim = [
+  "metadrive-simulator @ git+https://github.com/metadriverse/metadrive.git",
+  "peft>=0.10.0",
+]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.4.0",
+  "mypy>=1.9.0",
+]
+
+[project.scripts]
+av-drive = "src.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
