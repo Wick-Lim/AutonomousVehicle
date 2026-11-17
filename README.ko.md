@@ -10,8 +10,18 @@
 
 ---
 
-## 🎬 실시간 폐루프 자율주행 데모 (`driving_demo_carla_smooth` — CARLA 0.9.16 `Town10HD_Opt` 10대 FSD 시나리오 × 10종 기상)
+## 🎬 실시간 폐루프 자율주행 데모 (`CARLA 0.9.16`)
 
+### A. 주행 중 실시간 동적 A\* 재탐색, 고속도로 장애물 S-커브 우회 접합 및 순수 비전 맵리스 완주 (`Town10HD_Opt` & `Town04_Opt`)
+<p align="center">
+  <img src="assets/driving_demo_multiroute_mapless.gif" width="840" alt="CARLA 0.9.16 Dynamic A* Re-Routing, Roadblock Bypass & Mapless Vision Demo" />
+  <br/>
+  🎥 <b><a href="assets/driving_demo_multiroute_mapless.mp4">고화질 H.264 MP4 영상 보기 (assets/driving_demo_multiroute_mapless.mp4 — 실시간 A* 목적지 재탐색 + 고속도로 도로 폐쇄 우회 + HD맵 드롭아웃 순수 비전 완주)</a></b>
+  <br/>
+  <sub>[1/3] <code>Town10HD_Opt</code> 주행 중 목적지 변경 실시간 전역 A* 재탐색 · [2/3] <code>Town04_Opt</code> 고속도로 정지 장애물 5차 S-커브 + 36m 차선 유지 후 A* 재접합 · [3/3] 주행 중 <code>hd_map_dropout</code> 발생 시 무파라미터 <code>MaplessVisionCorridorEstimator</code> 100% 완주 (12/12 무사고)</sub>
+</p>
+
+### B. 10대 도심 FSD 시나리오 × 10종 기상·야간 스위트 (`Town10HD_Opt`)
 <p align="center">
   <img src="assets/driving_demo_carla_smooth.gif" width="840" alt="CARLA 0.9.16 Smooth Urban FSD Demo" />
   <br/>
@@ -146,7 +156,9 @@ python -m src.cli eval --simulator carla --auto-launch-carla --perception-mode v
 ```text
 AutonomousVehicle/
 ├── assets/
-│   ├── driving_demo_carla_smooth.gif # GitHub README 인라인 자동 재생 데모 GIF
+│   ├── driving_demo_multiroute_mapless.gif # 인라인 GIF: 실시간 A* 재탐색, 도로 폐쇄 우회 및 순수 비전 맵리스 주행
+│   ├── driving_demo_multiroute_mapless.mp4 # 다중 도시 동적 A* 및 HD맵 드롭아웃 인계 H.264 MP4 영상
+│   ├── driving_demo_carla_smooth.gif # 10대 도심 FSD 시나리오 인라인 자동 재생 데모 GIF
 │   └── driving_demo_carla_smooth.mp4 # CARLA 0.9.16 도심 FSD 시나리오 원본 MP4 영상
 ├── paper/
 │   ├── main.tex                      # 영문 LaTeX 연구 논문 소스 (IEEE/CVPR 2단 양식)

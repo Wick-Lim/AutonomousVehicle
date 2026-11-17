@@ -10,8 +10,18 @@
 
 ---
 
-## 🎬 Live Closed-Loop Autonomous Driving Demo (`driving_demo_carla_smooth` — CARLA 0.9.16 `Town10HD_Opt` 10-Scenario Suite)
+## 🎬 Live Closed-Loop Autonomous Driving Demos (`CARLA 0.9.16`)
 
+### A. Live Dynamic A\* Re-Routing, Highway Roadblock S-Curve Splice & Mid-Drive Mapless Takeover (`Town10HD_Opt` & `Town04_Opt`)
+<p align="center">
+  <img src="assets/driving_demo_multiroute_mapless.gif" width="840" alt="CARLA 0.9.16 Dynamic A* Re-Routing, Roadblock Bypass & Mapless Vision Demo" />
+  <br/>
+  🎥 <b><a href="assets/driving_demo_multiroute_mapless.mp4">Watch Full H.264 MP4 Video (assets/driving_demo_multiroute_mapless.mp4 — Live A* Re-Route + Highway Roadblock Bypass + HD-Map Dropout Mapless Arrival)</a></b>
+  <br/>
+  <sub>[1/3] <code>Town10HD_Opt</code> Mid-Drive Destination Click Global A* Re-Plan · [2/3] <code>Town04_Opt</code> Highway Roadblock 5th-Order Quintic S-Curve + 36m Hold + A* Splice · [3/3] Live <code>hd_map_dropout</code> &rarr; Zero-Parameter <code>MaplessVisionCorridorEstimator</code> 100% Arrival (12/12 Crash-Free)</sub>
+</p>
+
+### B. 10-Scenario × 10-Weather Urban FSD Suite (`Town10HD_Opt`)
 <p align="center">
   <img src="assets/driving_demo_carla_smooth.gif" width="840" alt="CARLA 0.9.16 Smooth Urban FSD Demo" />
   <br/>
@@ -146,7 +156,9 @@ python -m src.cli eval --simulator carla --auto-launch-carla --perception-mode v
 ```text
 AutonomousVehicle/
 ├── assets/
-│   ├── driving_demo_carla_smooth.gif # Auto-playing inline GIF for GitHub README
+│   ├── driving_demo_multiroute_mapless.gif # Inline GIF: Live A* Re-Route, Roadblock Bypass & Mapless Vision
+│   ├── driving_demo_multiroute_mapless.mp4 # H.264 MP4 of Multi-Town Dynamic A* & HD-Map-Dropout Takeover
+│   ├── driving_demo_carla_smooth.gif # Auto-playing inline GIF for 10-Scenario Urban FSD Suite
 │   └── driving_demo_carla_smooth.mp4 # Full HD MP4 video of CARLA 0.9.16 Urban FSD scenarios
 ├── paper/
 │   ├── main.tex                      # English LaTeX research paper (IEEE/CVPR 2-column format)
