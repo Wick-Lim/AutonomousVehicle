@@ -115,6 +115,10 @@ class LayaConfig(BaseModel):
     use_lora: bool = False
     lora_r: int = Field(default=8, ge=1)
     lora_alpha: int = Field(default=16, ge=1)
+    decision_mode: Literal["hybrid_prior", "pure_neural"] = "hybrid_prior"
+    trajectory_mode: Literal["residual_regularizer", "obstacle_aware_e2e"] = (
+        "residual_regularizer"
+    )
 
 
 class PrimitivesConfig(BaseModel):
@@ -174,6 +178,7 @@ class LongitudinalPIDConfig(BaseModel):
 class ControlConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    control_mode: Literal["hybrid_shield", "pure_e2e_trajectory"] = "hybrid_shield"
     safety_shield: SafetyShieldConfig = Field(default_factory=SafetyShieldConfig)
     lateral_pid: LateralPIDConfig = Field(default_factory=LateralPIDConfig)
     longitudinal_pid: LongitudinalPIDConfig = Field(default_factory=LongitudinalPIDConfig)

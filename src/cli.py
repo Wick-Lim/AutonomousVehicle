@@ -36,6 +36,9 @@ _PIPELINE_SCRIPTS = {
     "eval": PROJECT_ROOT / "scripts" / "04_evaluate_sim.py",
     "stress-bench": PROJECT_ROOT / "scripts" / "05_stress_benchmark.py",
     "multiroute-bench": PROJECT_ROOT / "scripts" / "06_multiroute_benchmark.py",
+    "train-e2e": PROJECT_ROOT / "scripts" / "07_train_e2e_trajectory.py",
+    "finetune-rl": PROJECT_ROOT / "scripts" / "08_finetune_rl.py",
+    "e2e-bench": PROJECT_ROOT / "scripts" / "09_e2e_benchmark.py",
 }
 
 
@@ -292,7 +295,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_cockpit.add_argument("--projector-ckpt", type=str, default=None)
     p_cockpit.add_argument("--temperature-ckpt", type=str, default=None)
 
-    for pipe_name in ("collect", "train", "calibrate", "eval", "stress-bench", "multiroute-bench"):
+    for pipe_name in (
+        "collect",
+        "train",
+        "calibrate",
+        "eval",
+        "stress-bench",
+        "multiroute-bench",
+        "train-e2e",
+        "finetune-rl",
+        "e2e-bench",
+    ):
         sub.add_parser(pipe_name, help=f"Run pipeline stage `{pipe_name}` (forwards remaining CLI flags).")
 
     args, extras = parser.parse_known_args(argv)

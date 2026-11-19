@@ -215,6 +215,23 @@ class SpatialProjector(nn.Module):
         self._prev_tokens = None
         self._temporal_delta_norm = 0.0
 
+    def enable_temporal_learning(self, gain: float = 0.08) -> bool:
+        """Break the 0x0 saddle point on (temporal_proj.weight, temporal_gate).
+
+        Default initialization sets both `temporal_proj.weight = 0` and `temporal_gate = 0`,
+        which yields identically zero gradient wrt both parameters forever. Orthogonally
+        initializing `temporal_proj.weight` while keeping `temporal_gate = 0.0` preserves
+        exact Step-0 identity output (`V_t + tanh(0) * W dV == V_t`) while immediately
+        delivering non-zero gradient `d(out)/d(temporal_gate) = W dV != 0`.
+        """
+        with torch.no_grad():
+            max_w = float(self.temporal_proj.weight.detach().abs().max().item())
+            if max_w < 1e-8:
+                nn.init.orthogonal_(self.temporal_proj.weight, gain=float(gain))
+                nn.init.zeros_(self.temporal_proj.bias)
+                return True
+        return False
+
     def count_trainable_parameters(self) -> int:
         """Return number of core spatial projector trainable parameters (~1.85M)."""
         core_params = (
@@ -239,17 +256,21 @@ class SpatialProjector(nn.Module):
     def forward(
         self,
         patch_tokens: torch.Tensor,
-        elapsed_steps: int = 1,
+        elapsed_steps: int | torch.Tensor = 1,
         prev_visual_tokens: Optional[torch.Tensor] = None,
+        use_temporal: bool = True,
     ) -> torch.Tensor:
         r"""Transform DINOv2 patch tokens into 36 spatial-temporal visual tokens for Laya.
 
         Args:
             patch_tokens: (B, 392, 768) or (B, 768, 14, 28) tensor.
             elapsed_steps: Number of elapsed 50ms control ticks since previous observed frame
-                (\Delta n_t >= 1) for step-normalized temporal residual \Delta V_t / \Delta n_t.
+                (\Delta n_t >= 1) as scalar int or per-sample (B,) tensor for step-normalized
+                temporal residual \Delta V_t / \Delta n_t.
             prev_visual_tokens: Optional caller-supplied previous frame tokens for isolated
                 multi-session temporal smoothing without mutating shared module state.
+            use_temporal: When False, return pure spatial tokens without temporal fusion or
+                ring-buffer mutation (used to encode reference `t - \Delta n` frames).
 
         Returns:
             visual_tokens: (B, 36, 1024) tensor ordered row-by-row over the 4x9 grid.
@@ -266,6 +287,7 @@ class SpatialProjector(nn.Module):
             )
         elif patch_tokens.dim() == 4:
             spatial_feat = patch_tokens
+            bsz = spatial_feat.shape[0]
         else:
             raise ValueError(f"Unsupported input shape: {patch_tokens.shape}")
 
@@ -281,13 +303,25 @@ class SpatialProjector(nn.Module):
         # Project to Laya hidden dimension: (B, 36, 1024)
         visual_tokens = self.mlp(tokens_36)
 
+        if not use_temporal:
+            return visual_tokens
+
         # Fuse step-normalized temporal motion residual (\Delta V_t = (V_t - V_{t-\Delta n_t}) / \Delta n_t)
         if prev_visual_tokens is not None:
             ref_tokens = prev_visual_tokens.to(
                 device=visual_tokens.device, dtype=visual_tokens.dtype
             )
             if ref_tokens.shape == visual_tokens.shape:
-                step_scale = float(max(1, int(elapsed_steps)))
+                if isinstance(elapsed_steps, torch.Tensor):
+                    step_scale: float | torch.Tensor = (
+                        elapsed_steps.to(
+                            device=visual_tokens.device, dtype=visual_tokens.dtype
+                        )
+                        .clamp_min(1.0)
+                        .reshape(bsz, 1, 1)
+                    )
+                else:
+                    step_scale = float(max(1, int(elapsed_steps)))
                 delta_v = (visual_tokens - ref_tokens) / step_scale
                 self._temporal_delta_norm = float(
                     delta_v.detach().norm(dim=-1).mean().item()
@@ -306,8 +340,11 @@ class SpatialProjector(nn.Module):
                 and self._prev_tokens.shape == visual_tokens.shape
                 and self._prev_tokens.device == visual_tokens.device
             ):
-                step_scale = float(max(1, int(elapsed_steps)))
-                delta_v = (visual_tokens - self._prev_tokens) / step_scale
+                if isinstance(elapsed_steps, torch.Tensor):
+                    step_scale_eval = float(max(1.0, float(elapsed_steps.reshape(-1)[0].item())))
+                else:
+                    step_scale_eval = float(max(1, int(elapsed_steps)))
+                delta_v = (visual_tokens - self._prev_tokens) / step_scale_eval
                 self._temporal_delta_norm = float(
                     delta_v.detach().norm(dim=-1).mean().item()
                 )

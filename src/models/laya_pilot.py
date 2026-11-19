@@ -18,6 +18,8 @@ from src.models.spatial_projector import SpatialProjector
 
 
 NAV_TO_ID = {"go_straight": 0, "turn_left": 1, "turn_right": 2, "merge": 3}
+VALID_DECISION_MODES: Tuple[str, ...] = ("hybrid_prior", "pure_neural")
+VALID_TRAJECTORY_MODES: Tuple[str, ...] = ("residual_regularizer", "obstacle_aware_e2e")
 
 
 class _LayaDecisionBackbone(nn.Module):
@@ -118,6 +120,8 @@ class LayaPilot(nn.Module):
         lora_r: int = 8,
         lora_alpha: int = 16,
         use_mock: bool = False,
+        decision_mode: str = "hybrid_prior",
+        trajectory_mode: str = "residual_regularizer",
     ) -> None:
         super().__init__()
         self.model_name = model_name
@@ -126,6 +130,11 @@ class LayaPilot(nn.Module):
         self.freeze_laya = freeze_laya
         self.use_lora = use_lora
         self.use_mock = use_mock
+        self.decision_mode: str = "hybrid_prior"
+        self.trajectory_mode: str = "residual_regularizer"
+        self.set_policy_modes(
+            decision_mode=decision_mode, trajectory_mode=trajectory_mode
+        )
 
         # Temperature scaling buffers (calibrated in Stage 2 via 03_calibrate.py)
         self.register_buffer("temp_maneuver", torch.ones(1, dtype=torch.float32))
@@ -178,6 +187,25 @@ class LayaPilot(nn.Module):
     def backbone(self) -> nn.Module:
         """Visual/decision encoder backbone reference for ablation inspection and parameter randomization."""
         return self.encoder if self.use_mock else self.laya_model
+
+    def set_policy_modes(
+        self,
+        decision_mode: Optional[str] = None,
+        trajectory_mode: Optional[str] = None,
+    ) -> None:
+        """Switch between legacy hybrid-prior and pure-neural / obstacle-aware E2E modes."""
+        if decision_mode is not None:
+            if decision_mode not in VALID_DECISION_MODES:
+                raise ValueError(
+                    f"Unsupported decision_mode '{decision_mode}'. Expected one of {VALID_DECISION_MODES}."
+                )
+            self.decision_mode = str(decision_mode)
+        if trajectory_mode is not None:
+            if trajectory_mode not in VALID_TRAJECTORY_MODES:
+                raise ValueError(
+                    f"Unsupported trajectory_mode '{trajectory_mode}'. Expected one of {VALID_TRAJECTORY_MODES}."
+                )
+            self.trajectory_mode = str(trajectory_mode)
 
     def _init_frozen_readout_buffers(self) -> None:
         """Initialize deterministic frozen option-marker readout buffers."""
@@ -575,19 +603,22 @@ class LayaPilot(nn.Module):
             )
             marker_hidden = hidden_states[batch_indices, marker_positions]  # (B, 9, 1024)
 
-            # Weight-tied attention readout over the 36 spatial visual tokens + structured telemetry prior
-            attn_weights = torch.softmax(
-                torch.matmul(visual_tokens, self.mock_vis_readout) / 8.0, dim=1
-            )  # (B, 36, 9)
-            pooled_vis = torch.einsum("bti,btn->bin", attn_weights, visual_tokens)  # (B, 9, 1024)
-            vis_logits = (
-                (pooled_vis + 0.15 * marker_hidden + visual_tokens.mean(dim=1, keepdim=True))
-                * self.mock_vis_readout.T.unsqueeze(0)
-            ).sum(dim=-1) * 0.75
+            if self.decision_mode == "hybrid_prior":
+                # Weight-tied attention readout over the 36 spatial visual tokens + structured telemetry prior
+                attn_weights = torch.softmax(
+                    torch.matmul(visual_tokens, self.mock_vis_readout) / 8.0, dim=1
+                )  # (B, 36, 9)
+                pooled_vis = torch.einsum("bti,btn->bin", attn_weights, visual_tokens)  # (B, 9, 1024)
+                vis_logits = (
+                    (pooled_vis + 0.15 * marker_hidden + visual_tokens.mean(dim=1, keepdim=True))
+                    * self.mock_vis_readout.T.unsqueeze(0)
+                ).sum(dim=-1) * 0.75
 
-            tel_vec = self._encode_telemetry_vector(telemetries, visual_tokens.device)
-            tel_logits = torch.matmul(tel_vec, self.mock_tel_readout)
-            marker_logits = vis_logits + tel_logits
+                tel_vec = self._encode_telemetry_vector(telemetries, visual_tokens.device)
+                tel_logits = torch.matmul(tel_vec, self.mock_tel_readout)
+                marker_logits = vis_logits + tel_logits
+            else:
+                marker_logits = None
         else:
             outputs = self.laya_model.encoder(
                 inputs_embeds=inputs_embeds,
@@ -612,26 +643,44 @@ class LayaPilot(nn.Module):
             marker_hidden = marker_hidden + self.laya_model.type_emb(
                 qtype_ids
             ).unsqueeze(0)
-            laya_logits = self.option_scorer(marker_hidden).squeeze(-1)
 
-            attn_weights = torch.softmax(
-                torch.matmul(visual_tokens, self.mock_vis_readout) / 8.0, dim=1
-            )
-            pooled_vis = torch.einsum("bti,btn->bin", attn_weights, visual_tokens)
-            vis_logits = (
-                (pooled_vis + 0.15 * marker_hidden + visual_tokens.mean(dim=1, keepdim=True))
-                * self.mock_vis_readout.T.unsqueeze(0)
-            ).sum(dim=-1) * 0.75
+            if self.decision_mode == "hybrid_prior":
+                laya_logits = self.option_scorer(marker_hidden).squeeze(-1)
 
-            tel_vec = self._encode_telemetry_vector(telemetries, visual_tokens.device)
-            tel_logits = torch.matmul(tel_vec, self.mock_tel_readout)
-            marker_logits = (
-                torch.tanh((0.25 * laya_logits + vis_logits) / 4.0) * 1.2 + tel_logits
-            )
+                attn_weights = torch.softmax(
+                    torch.matmul(visual_tokens, self.mock_vis_readout) / 8.0, dim=1
+                )
+                pooled_vis = torch.einsum("bti,btn->bin", attn_weights, visual_tokens)
+                vis_logits = (
+                    (pooled_vis + 0.15 * marker_hidden + visual_tokens.mean(dim=1, keepdim=True))
+                    * self.mock_vis_readout.T.unsqueeze(0)
+                ).sum(dim=-1) * 0.75
 
-        maneuver_logits = marker_logits[:, 0:4]  # (B, 4)
-        speed_logits = marker_logits[:, 4:8]     # (B, 4)
-        aeb_logits = marker_logits[:, 8:9]       # (B, 1)
+                tel_vec = self._encode_telemetry_vector(telemetries, visual_tokens.device)
+                tel_logits = torch.matmul(tel_vec, self.mock_tel_readout)
+                marker_logits = (
+                    torch.tanh((0.25 * laya_logits + vis_logits) / 4.0) * 1.2 + tel_logits
+                )
+            else:
+                marker_logits = None
+
+        ctx_feat = (
+            0.5 * marker_hidden.mean(dim=1).float()
+            + 0.5 * visual_tokens.mean(dim=1).float()
+        )
+        mlp_maneuver_logits = self.maneuver_head(ctx_feat).float()
+        mlp_speed_logits = self.speed_head(ctx_feat).float()
+        mlp_aeb_logits = self.aeb_head(ctx_feat).float()
+
+        if self.decision_mode == "pure_neural":
+            maneuver_logits = mlp_maneuver_logits  # (B, 4) — zero mock_tel_readout bias
+            speed_logits = mlp_speed_logits        # (B, 4)
+            aeb_logits = mlp_aeb_logits            # (B, 1)
+        else:
+            assert marker_logits is not None
+            maneuver_logits = marker_logits[:, 0:4].float()  # (B, 4)
+            speed_logits = marker_logits[:, 4:8].float()     # (B, 4)
+            aeb_logits = marker_logits[:, 8:9].float()       # (B, 1)
 
         # Temperature-calibrated probability distributions
         maneuver_probs = F.softmax(maneuver_logits / self.temp_maneuver, dim=-1)
@@ -643,11 +692,6 @@ class LayaPilot(nn.Module):
         maneuver_conf, maneuver_idx = maneuver_probs.max(dim=-1)
         speed_conf, speed_level = speed_probs.max(dim=-1)
 
-        ctx_feat = 0.5 * marker_hidden.mean(dim=1) + 0.5 * visual_tokens.mean(dim=1)
-        mlp_maneuver_logits = self.maneuver_head(ctx_feat)
-        mlp_speed_logits = self.speed_head(ctx_feat)
-        mlp_aeb_logits = self.aeb_head(ctx_feat)
-
         predicted_trajectory = self._predict_trajectory_waypoints(
             marker_hidden=marker_hidden,
             visual_tokens=visual_tokens,
@@ -655,6 +699,7 @@ class LayaPilot(nn.Module):
             speed_probs=speed_probs,
             aeb_probs=aeb_probs,
             telemetries=telemetries,
+            ctx_feat=ctx_feat,
         )
 
         return {
@@ -672,6 +717,7 @@ class LayaPilot(nn.Module):
             "speed_confidence": speed_conf,
             "emergency_brake": aeb_probs,
             "predicted_trajectory": predicted_trajectory,
+            "ctx_feat": ctx_feat,
         }
 
     def _predict_trajectory_waypoints(
@@ -682,17 +728,34 @@ class LayaPilot(nn.Module):
         speed_probs: torch.Tensor,
         aeb_probs: torch.Tensor,
         telemetries: Sequence[Dict[str, Any]],
+        ctx_feat: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Synthesize 6 future ego-frame waypoints {(x_k, y_k, v_k)}_{k=1}^6 (t = 0.5s .. 3.0s).
 
-        Combines a single-pass neural trajectory residual head with the minimum-jerk
-        Quintic S-Curve s(tau) = 10*tau^3 - 15*tau^4 + 6*tau^5 and Constant-Time-Headway
-        ACC kinematic prior parameterized by Laya's calibrated decision probabilities.
+        Supports two modes without changing the 195,208-parameter `trajectory_head`:
+          - `"residual_regularizer"` (legacy): Combines bounded neural residuals with the
+            Quintic S-Curve and CTH-ACC kinematic prior.
+          - `"obstacle_aware_e2e"` (Track 1 / Track 3): Direct neural parameterization with
+            strictly forward-monotonic `x_k` and full `[-4.5, +4.5] m` lateral obstacle bypass
+            capacity — zero rule-based kinematic prior or telemetry lookup.
         """
         device = visual_tokens.device
         bsz = visual_tokens.shape[0]
-        ctx_feat = 0.5 * marker_hidden.mean(dim=1) + 0.5 * visual_tokens.mean(dim=1)
-        neural_res = torch.tanh(self.trajectory_head(ctx_feat)).reshape(bsz, 6, 3)
+        if ctx_feat is None:
+            ctx_feat = (
+                0.5 * marker_hidden.mean(dim=1).float()
+                + 0.5 * visual_tokens.mean(dim=1).float()
+            )
+
+        if self.trajectory_mode == "obstacle_aware_e2e":
+            raw = self.trajectory_head(ctx_feat).float().reshape(bsz, 6, 3)
+            v_k = 70.0 * torch.sigmoid(raw[:, :, 2])  # [0, 70] km/h
+            dx_k = F.softplus((v_k / 3.6) * 0.5 + 1.5 * torch.tanh(raw[:, :, 0]))  # strictly >= 0
+            x_k = torch.cumsum(dx_k, dim=1)  # monotonic forward x (m)
+            y_k = 4.5 * torch.tanh(raw[:, :, 1])  # full [-4.5, +4.5] m obstacle bypass
+            return torch.stack([x_k, y_k, v_k], dim=-1)  # (B, 6, 3)
+
+        neural_res = torch.tanh(self.trajectory_head(ctx_feat).float()).reshape(bsz, 6, 3)
 
         speed_tiers = torch.tensor([0.0, 20.0, 40.0, 65.0], dtype=torch.float32, device=device)
         exp_speed_kmh = (speed_probs * speed_tiers.unsqueeze(0)).sum(dim=-1) * (1.0 - aeb_probs)
@@ -779,11 +842,30 @@ class AutonomousDrivingSystem(nn.Module):
             lora_r=int(laya_cfg.get("lora_r", 8)),
             lora_alpha=int(laya_cfg.get("lora_alpha", 16)),
             use_mock=is_mock,
+            decision_mode=str(laya_cfg.get("decision_mode", "hybrid_prior")),
+            trajectory_mode=str(
+                laya_cfg.get("trajectory_mode", "residual_regularizer")
+            ),
         )
 
     def reset_temporal_buffer(self) -> None:
         """Reset temporal token ring buffer in SpatialProjector at episode start."""
         self.projector.reset_temporal_buffer()
+
+    def enable_temporal_learning(self, gain: float = 0.08) -> bool:
+        """Unlock SpatialProjector's temporal motion residual weights (0x0 saddle-point break)."""
+        return self.projector.enable_temporal_learning(gain=gain)
+
+    def set_policy_modes(
+        self,
+        decision_mode: Optional[str] = None,
+        trajectory_mode: Optional[str] = None,
+    ) -> None:
+        """Switch LayaPilot decision & trajectory decoding modes without altering parameter count."""
+        self.laya.set_policy_modes(
+            decision_mode=decision_mode,
+            trajectory_mode=trajectory_mode,
+        )
 
     def save_adapter_checkpoint(
         self,
@@ -791,13 +873,19 @@ class AutonomousDrivingSystem(nn.Module):
         epoch: int = 0,
         val_metrics: Optional[Dict[str, Any]] = None,
         config: Optional[Dict[str, Any]] = None,
+        training_stage: Optional[str] = None,
     ) -> None:
-        """Atomically save all trainable adapter and readout/trajectory head weights."""
+        """Atomically save all trainable adapter and readout/trajectory head weights (v1.1 / v1.2)."""
         ckpt_path = Path(path)
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
-        payload = {
-            "schema_version": "1.1",
+        is_v12 = (
+            self.laya.decision_mode != "hybrid_prior"
+            or self.laya.trajectory_mode != "residual_regularizer"
+            or training_stage is not None
+        )
+        payload: Dict[str, Any] = {
+            "schema_version": "1.2" if is_v12 else "1.1",
             "epoch": int(epoch),
             "projector_state_dict": self.projector.state_dict(),
             "trajectory_head_state_dict": self.laya.trajectory_head.state_dict(),
@@ -807,6 +895,10 @@ class AutonomousDrivingSystem(nn.Module):
             "val_metrics": val_metrics or {},
             "config": config or {},
         }
+        if is_v12:
+            payload["decision_mode"] = self.laya.decision_mode
+            payload["trajectory_mode"] = self.laya.trajectory_mode
+            payload["training_stage"] = str(training_stage or "e2e")
         torch.save(payload, tmp_path)
         os.replace(tmp_path, ckpt_path)
 
@@ -815,8 +907,9 @@ class AutonomousDrivingSystem(nn.Module):
         path: str | Path,
         map_location: Any = "cpu",
         strict: bool = False,
+        restore_modes: bool = True,
     ) -> Dict[str, Any]:
-        """Load projector and optional head state dicts from checkpoint (backward-compatible)."""
+        """Load projector and optional head state dicts from checkpoint (v1.0/v1.1/v1.2 compatible)."""
         ckpt_path = Path(path)
         ckpt = torch.load(ckpt_path, map_location=map_location, weights_only=False)
         if "projector_state_dict" in ckpt:
@@ -830,6 +923,14 @@ class AutonomousDrivingSystem(nn.Module):
         for key, mod in head_map.items():
             if key in ckpt and ckpt[key] is not None:
                 mod.load_state_dict(ckpt[key], strict=strict)
+        if restore_modes and isinstance(ckpt, dict):
+            dm = ckpt.get("decision_mode")
+            tm = ckpt.get("trajectory_mode")
+            if dm in VALID_DECISION_MODES or tm in VALID_TRAJECTORY_MODES:
+                self.set_policy_modes(
+                    decision_mode=dm if dm in VALID_DECISION_MODES else None,
+                    trajectory_mode=tm if tm in VALID_TRAJECTORY_MODES else None,
+                )
         return ckpt
 
     def load_temperature_checkpoint(
@@ -849,32 +950,56 @@ class AutonomousDrivingSystem(nn.Module):
         )
         return t_ckpt
 
-    def forward(
+    def forward_from_patch_tokens(
         self,
-        images: torch.Tensor,
+        patch_tokens: torch.Tensor,
         telemetries: Sequence[Dict[str, Any]],
-        elapsed_steps: Optional[int] = None,
+        elapsed_steps: Optional[int | torch.Tensor] = None,
         prev_visual_tokens: Optional[torch.Tensor] = None,
+        aux_use_prior: bool = True,
     ) -> Dict[str, Any]:
-        """Single forward pass from (B, 3, 196, 392) images + telemetry dicts to decisions & trajectory."""
-        with torch.no_grad():
-            patch_tokens = self.dino(images)  # (B, 392, 768)
-        eff_elapsed = (
-            int(elapsed_steps)
-            if elapsed_steps is not None
-            else (max(1, int(telemetries[0].get("elapsed_steps", 1))) if len(telemetries) == 1 else 1)
-        )
+        """Run SpatialProjector + AuxPerception + LayaPilot directly from cached DINOv2 patch tokens."""
+        eff_elapsed: int | torch.Tensor
+        if elapsed_steps is not None:
+            eff_elapsed = elapsed_steps
+        elif len(telemetries) == 1:
+            eff_elapsed = max(1, int(telemetries[0].get("elapsed_steps", 1)))
+        else:
+            eff_elapsed = 1
+
         visual_tokens = self.projector(
             patch_tokens,
             elapsed_steps=eff_elapsed,
             prev_visual_tokens=prev_visual_tokens,
         )  # (B, 36, 1024)
         aux_perception = self.projector.predict_aux_perception(
-            visual_tokens, telemetries=telemetries
+            visual_tokens,
+            telemetries=telemetries if aux_use_prior else None,
         )
         outputs = self.laya(visual_tokens, telemetries)
         outputs["visual_tokens"] = visual_tokens
         outputs["aux_perception"] = aux_perception
+        return outputs
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        telemetries: Sequence[Dict[str, Any]],
+        elapsed_steps: Optional[int | torch.Tensor] = None,
+        prev_visual_tokens: Optional[torch.Tensor] = None,
+        aux_use_prior: bool = True,
+    ) -> Dict[str, Any]:
+        """Single forward pass from (B, 3, 196, 392) images + telemetry dicts to decisions & trajectory."""
+        with torch.no_grad():
+            patch_tokens = self.dino(images)  # (B, 392, 768)
+        outputs = self.forward_from_patch_tokens(
+            patch_tokens=patch_tokens,
+            telemetries=telemetries,
+            elapsed_steps=elapsed_steps,
+            prev_visual_tokens=prev_visual_tokens,
+            aux_use_prior=aux_use_prior,
+        )
+        outputs["patch_tokens"] = patch_tokens
         return outputs
 
     @torch.no_grad()

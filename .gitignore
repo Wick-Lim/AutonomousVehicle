@@ -1,6 +1,7 @@
 # Collected dataset & model checkpoints
 data/*
 !data/.gitkeep
+data_e2e/
 checkpoints/*
 !checkpoints/.gitkeep
 !checkpoints/eval_metrics.json

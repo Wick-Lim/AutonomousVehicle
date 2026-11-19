@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from src.config import AppConfig, load_validated_config
+from src.control.e2e_trajectory_tracker import PureE2ETrajectoryTracker
 from src.control.rust_backend import BACKEND_NAME, RUST_CORE_AVAILABLE, get_backend
 from src.control.shield_pid import SafetyShieldPID
 from src.models.laya_pilot import AutonomousDrivingSystem
@@ -68,6 +69,9 @@ class SessionContext:
     session_id: str
     controller: SafetyShieldPID
     lead_speed_estimator: Any
+    e2e_tracker: PureE2ETrajectoryTracker = field(
+        default_factory=PureE2ETrajectoryTracker
+    )
     fusion_tracker: MultiSensorFusionTracker = field(
         default_factory=MultiSensorFusionTracker
     )
@@ -284,6 +288,7 @@ class DrivingRuntimeEngine:
                 return False
         with ctx.lock:
             ctx.controller.reset()
+            ctx.e2e_tracker.reset()
             ctx.lead_speed_estimator.reset(35.0)
             ctx.fusion_tracker.reset(35.0)
             ctx.prev_visual_tokens = None
@@ -369,8 +374,9 @@ class DrivingRuntimeEngine:
         shield_enabled: bool = True,
         dt: float = 0.05,
         strict_input: bool = True,
+        control_mode: Optional[Literal["hybrid_shield", "pure_e2e_trajectory"]] = None,
     ) -> StepInferenceResponse:
-        """Execute one closed-loop inference + perception + safety shield + PID step."""
+        """Execute one closed-loop inference + perception + safety shield + PID (or pure E2E) step."""
         t0 = time.perf_counter()
         tel_model = (
             telemetry
@@ -591,12 +597,24 @@ class DrivingRuntimeEngine:
                     "predicted_trajectory": pred_traj,
                 }
 
-                (steering, throttle_brake), gated = ctx.controller.compute_control(
-                    decision_dict,
-                    ctrl_tel,
-                    dt=float(dt),
-                    shield_enabled=bool(shield_enabled),
+                eff_control_mode = (
+                    str(control_mode)
+                    if control_mode is not None
+                    else str(self.app_config.control.control_mode)
                 )
+                if eff_control_mode == "pure_e2e_trajectory":
+                    (steering, throttle_brake), gated = ctx.e2e_tracker.compute_control(
+                        decision_dict,
+                        speed_kmh=float(base_tel.get("speed_kmh", 0.0)),
+                        dt=float(dt),
+                    )
+                else:
+                    (steering, throttle_brake), gated = ctx.controller.compute_control(
+                        decision_dict,
+                        ctrl_tel,
+                        dt=float(dt),
+                        shield_enabled=bool(shield_enabled),
+                    )
 
                 if not (math.isfinite(steering) and math.isfinite(throttle_brake)):
                     raise RuntimeError("Non-finite control output detected")
